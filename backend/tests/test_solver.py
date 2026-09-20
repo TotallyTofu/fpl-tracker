@@ -1,8 +1,17 @@
-"""Solver tests: structural validity + convergence guard (PLAN-2 T1.16)."""
+"""Solver tests: structural validity + convergence guard (PLAN-2 T1.16, T4.1)."""
 import pytest
 
 from app.optimizer.rules import validate_lineup
-from app.optimizer.solver import PROFILES, SolveParams, dedupe_profiles, lineup_key, solve
+from app.optimizer.solver import (
+    PROFILES,
+    SolvedLineup,
+    SolveParams,
+    _try_low_own_swap,
+    _try_second_captain,
+    dedupe_profiles,
+    lineup_key,
+    solve,
+)
 
 
 def test_all_profiles_return_valid_lineups(db_path, cfg):
@@ -115,3 +124,122 @@ def test_signal_applied_note_in_rationale(db_path, cfg):
                           signals_by_player={1: [dict(sig)]}))
     assert 1 in s.xi
     assert any(n.startswith("Signal applied: Goal One") for n in s.notes)
+
+
+# ---------------------------------------------------------------------------
+# T4.1 — differential tuning: floor, convergence attempts, rationale lines
+# ---------------------------------------------------------------------------
+
+def test_differential_floor_excludes_low_ep(db_path, cfg):
+    """The EP floor keeps only players at/above floor × max EP."""
+    from app.optimizer.solver import _apply_ep_floor, build_universe
+
+    uni = build_universe(6, cfg)
+    for p in uni:
+        p["ep"] = float(p["ep_next"])  # stand-in for ep_final
+    cfg.optimizer.differential_ep_floor = 0.6
+    filtered = _apply_ep_floor(uni, cfg)
+    max_ep = max(p["ep"] for p in uni)
+    assert len(filtered) < len(uni)
+    assert all(p["ep"] >= 0.6 * max_ep for p in filtered)
+    kept = {p["id"] for p in filtered}
+    assert all(p["id"] in kept for p in uni if p["ep"] >= 0.6 * max_ep)
+    assert _apply_ep_floor([], cfg) == []
+
+
+def test_differential_rationale_lines_present(db_path, cfg):
+    """Every XI player owned by <10% gets a per-player differential note."""
+    from app.db import execute
+
+    execute("UPDATE players SET selected_by_percent = 1.0")
+    s = solve(SolveParams(current_squad=[], bank=5, chips={}, target_gw=6,
+                          profile="differential", cfg=cfg))
+    lines = [n for n in s.notes if n.startswith("Differential: ") and "owned by" in n]
+    assert lines, "expected per-player differential rationale lines"
+    assert all("(top-50 EP)" in n for n in lines)
+    assert len(lines) <= 5
+
+
+def _mk_lineup(squad, universe):
+    """Hand-built SolvedLineup from a valid_squad() entry list (no solve needed)."""
+    xi = [e["player_id"] for e in squad if e["role"] == "starter"]
+    return SolvedLineup(
+        squad=[dict(e) for e in squad],
+        xi=xi,
+        captain=next(e["player_id"] for e in squad if e["is_captain"]),
+        vice_captain=next(e["player_id"] for e in squad if e["is_vice_captain"]),
+        bench=[e["player_id"] for e in sorted(
+            (e for e in squad if e["role"] == "bench"), key=lambda e: e["bench_order"] or 0)],
+        objective=1.0,
+        projected_points={"adjusted": 1.0, "baseline": 1.0},
+        universe=universe,
+    )
+
+
+def _converged_pair(db_path, cfg, eps):
+    """Two key-identical lineups (same squad/XI/captain) over a shared universe."""
+    from conftest import valid_squad
+
+    squad = valid_squad()
+    universe = [
+        {"id": e["player_id"], "ep": eps.get(e["player_id"], 8.0),
+         "selected_by_percent": 99.0, "element_type": e["element_type"],
+         "team": e["team"], "now_cost": e["now_cost"], "web_name": e["web_name"],
+         "status": "a", "can_select": 1}
+        for e in squad
+    ]
+    a = _mk_lineup(squad, universe)
+    b = _mk_lineup(squad, universe)
+    assert lineup_key(a) == lineup_key(b)
+    return a, b
+
+
+def test_convergence_attempt_second_captain(db_path, cfg):
+    """Attempt (1): captain moves to the 2nd-best-EP starter; no variant label."""
+    # captain (id 1) is the top EP → 2nd-best (id 3) becomes captain
+    a, b = _converged_pair(db_path, cfg, {1: 10.0, 3: 9.0})
+    out = dedupe_profiles({"max_ep": a, "safe": b})
+    assert out["safe"].variant_of is None
+    assert out["safe"].captain == 3
+    assert out["safe"].vice_captain != 3
+    assert out["safe"].vice_captain in set(out["safe"].xi)
+    assert lineup_key(out["safe"]) != lineup_key(out["max_ep"])
+
+
+def test_convergence_variant_labeled_when_attempts_exhausted(db_path, cfg):
+    """Both attempts fail (captain already 2nd-best EP, no <25% candidates)
+    → the profile is labeled a variant of the first one."""
+    # captain (id 1) is 2nd-best (id 3 is top) → attempt (1) is a no-op;
+    # all universe players are 99%-owned → attempt (2) has no candidates.
+    a, b = _converged_pair(db_path, cfg, {3: 10.0, 1: 9.0})
+    out = dedupe_profiles({"max_ep": a, "safe": b})
+    assert out["safe"].variant_of == "max_ep"
+    assert lineup_key(out["safe"]) == lineup_key(out["max_ep"])
+
+
+def test_convergence_attempt_low_own_swap(db_path, cfg):
+    """Attempt (2): swaps in the best-EP player owned by <25% when the captain
+    attempt is a no-op; budget and club cap must hold."""
+    from conftest import valid_squad
+
+    squad = valid_squad()
+    universe = [
+        {"id": e["player_id"], "ep": {3: 10.0, 1: 9.0}.get(e["player_id"], 8.0),
+         "selected_by_percent": 99.0, "element_type": e["element_type"],
+         "team": e["team"], "now_cost": e["now_cost"], "web_name": e["web_name"],
+         "status": "a", "can_select": 1}
+        for e in squad
+    ]
+    # new team 6, cheap FWD, low ownership, best EP in the universe
+    universe.append({"id": 30, "ep": 50.0, "selected_by_percent": 5.0,
+                     "element_type": 4, "team": 6, "now_cost": 40,
+                     "web_name": "Diff Fwd", "status": "a", "can_select": 1})
+    a = _mk_lineup(squad, universe)
+    b = _mk_lineup(squad, universe)
+    assert lineup_key(a) == lineup_key(b)
+    out = dedupe_profiles({"max_ep": a, "safe": b})
+    ids = {e["player_id"] for e in out["safe"].squad}
+    assert 30 in ids and 19 not in ids  # cheapest FWD (id 19) replaced
+    assert 30 in out["safe"].xi
+    assert out["safe"].variant_of is None
+    assert sum(e["now_cost"] for e in out["safe"].squad) <= 1000

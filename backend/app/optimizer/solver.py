@@ -40,6 +40,10 @@ class SolvedLineup:
     projected_points: dict
     variant_of: str | None = None
     notes: list[str] = field(default_factory=list)
+    # T4.1: kept in-memory (never serialized) so the convergence guard can
+    # differentiate a profile and re-score it after a captain/swap change.
+    universe: list[dict] = field(default_factory=list)
+    scoring_ctx: tuple | None = None  # (signals_by_player, cfg, diff_map)
 
 
 def build_universe(target_gw: int, cfg) -> list[dict]:
@@ -367,6 +371,17 @@ def _hill_climb(state: _State, universe: list[dict], value_fn, cfg,
     return best
 
 
+def _apply_ep_floor(universe: list[dict], cfg) -> list[dict]:
+    """T4.1: differential eligibility floor — candidates must have
+    ep_final ≥ optimizer.differential_ep_floor × max ep_final in the universe
+    (prevents the profile degenerating into low-EP lottery picks)."""
+    if not universe:
+        return universe
+    max_ep = max(p["ep"] for p in universe)
+    floor = cfg.optimizer.differential_ep_floor * max_ep
+    return [p for p in universe if p["ep"] >= floor]
+
+
 def solve(params: SolveParams) -> SolvedLineup:
     cfg = params.cfg
     rng = random.Random(params.rng_seed)
@@ -376,10 +391,7 @@ def solve(params: SolveParams) -> SolvedLineup:
 
     universe = [_precompute(p, cfg, signals, diff_map) for p in build_universe(params.target_gw, cfg)]
     if params.profile == "differential":
-        if universe:
-            max_ep = max(p["ep"] for p in universe)
-            floor = cfg.optimizer.differential_ep_floor * max_ep
-            universe = [p for p in universe if p["ep"] >= floor]
+        universe = _apply_ep_floor(universe, cfg)
     if not universe:
         raise ValueError("empty player universe — is the FPL data fresh?")
 
@@ -435,11 +447,12 @@ def solve(params: SolveParams) -> SolvedLineup:
             )
     if params.profile == "differential":
         diff_players = [p for p in xi_players if p["own"] < 10]
-        if diff_players:
+        for p in diff_players[:5]:
             notes.append(
-                "Differential picks (owned <10%): "
-                + ", ".join(f"{p.get('web_name', '?')} ({p['own']:.1f}%)" for p in diff_players[:4])
+                f"Differential: {p.get('web_name', '?')} owned by {p['own']:.1f}% (top-50 EP)"
             )
+        if len(diff_players) > 5:
+            notes.append(f"…and {len(diff_players) - 5} more low-ownership starters")
     if params.profile == "safe":
         risky = [p for p in xi_players if p.get("status") == "d" or p.get("chance_of_playing_next_round") == 50]
         if risky:
@@ -454,6 +467,8 @@ def solve(params: SolveParams) -> SolvedLineup:
         objective=round(best_obj, 3),
         projected_points=projected,
         notes=notes,
+        universe=universe,
+        scoring_ctx=(signals, cfg, diff_map),
     )
 
 
@@ -462,13 +477,118 @@ def lineup_key(s: SolvedLineup) -> tuple:
     return (frozenset(p["player_id"] for p in s.squad), frozenset(s.xi), s.captain)
 
 
+def _rescore(s: SolvedLineup) -> None:
+    """Recompute projected points after a captain/roster change (T4.1)."""
+    if not s.scoring_ctx:
+        return
+    signals, cfg, diff_map = s.scoring_ctx
+    squad_full = [p for p in s.universe if p["id"] in {e["player_id"] for e in s.squad}]
+    squad_by_id = {p["id"]: p for p in squad_full}
+    xi_players = [squad_by_id[i] for i in s.xi]
+    s.projected_points = score_lineup(
+        squad_full, xi_players, s.captain, s.vice_captain, signals, cfg,
+        {p["id"]: diff_map.get(p["team"]) for p in squad_full},
+    )
+
+
+def _try_second_captain(s: SolvedLineup) -> bool:
+    """Convergence attempt (1): captain = 2nd-best-EP starter (if different)."""
+    ep = {p["id"]: p.get("ep", 0.0) for p in s.universe}
+    xi = [e for e in s.squad if e["player_id"] in set(s.xi)]
+    if len(xi) < 3:
+        return False
+    ranked = sorted(xi, key=lambda e: ep.get(e["player_id"], 0.0), reverse=True)
+    second = ranked[1]["player_id"]
+    if second == s.captain:
+        return False
+    if second == s.vice_captain:
+        third = ranked[2]["player_id"]
+        if third == s.captain:
+            return False
+        for e in s.squad:
+            e["is_vice_captain"] = e["player_id"] == third
+        s.vice_captain = third
+    for e in s.squad:
+        e["is_captain"] = e["player_id"] == second
+    s.captain = second
+    return True
+
+
+def _try_low_own_swap(s: SolvedLineup) -> bool:
+    """Convergence attempt (2): swap in the best-EP player owned by <25% of the
+    public (replacing the weakest same-position squadmate); budget + club cap
+    must hold. Returns True if the squad changed."""
+    squad_ids = {e["player_id"] for e in s.squad}
+    club_count: dict[int, int] = {}
+    for e in s.squad:
+        club_count[e["team"]] = club_count.get(e["team"], 0) + 1
+    total_cost = sum(e["now_cost"] for e in s.squad)
+    by_pos: dict[int, list[dict]] = {}
+    for e in s.squad:
+        by_pos.setdefault(e["element_type"], []).append(e)
+    cands = sorted(
+        (p for p in s.universe
+         if p["id"] not in squad_ids and p.get("selected_by_percent", 100.0) < 25.0),
+        key=lambda p: p.get("ep", 0.0),
+        reverse=True,
+    )
+    for c in cands:
+        pos_mates = sorted(by_pos.get(c["element_type"], []),
+                           key=lambda e: e["now_cost"])
+        if not pos_mates:
+            continue
+        if club_count.get(c["team"], 0) >= CLUB_LIMIT:
+            continue
+        cheapest = pos_mates[0]
+        if total_cost - cheapest["now_cost"] + c["now_cost"] > BUDGET:
+            continue
+        old_id = cheapest["player_id"]  # capture before the in-place update
+        # apply the swap
+        for e in s.squad:
+            if e["player_id"] == old_id:
+                e.update({
+                    "player_id": c["id"],
+                    "web_name": c.get("web_name"),
+                    "element_type": c["element_type"],
+                    "team": c["team"],
+                    "now_cost": c["now_cost"],
+                    "status": c.get("status"),
+                    "can_select": c.get("can_select"),
+                    "selected_by_percent": c.get("selected_by_percent"),
+                })
+        if old_id in s.xi:
+            s.xi = [c["id"] if i == old_id else i for i in s.xi]
+        if s.captain == old_id:
+            s.captain = c["id"]
+        if s.vice_captain == old_id:
+            s.vice_captain = c["id"]
+        bench_sorted = sorted(
+            (e for e in s.squad if e["player_id"] not in set(s.xi)),
+            key=lambda e: {p["id"]: p.get("ep", 0.0) for p in s.universe}.get(e["player_id"], 0.0),
+            reverse=True,
+        )
+        for e in s.squad:
+            if e["player_id"] in set(s.xi):
+                e["bench_order"] = None
+            else:
+                e["bench_order"] = bench_sorted.index(e) + 1
+        s.bench = [e["player_id"] for e in bench_sorted]
+        return True
+    return False
+
+
 def dedupe_profiles(results: dict[str, SolvedLineup]) -> dict[str, SolvedLineup]:
-    """Convergence guard (T1.7.5): if a profile equals an earlier one, relabel as a
-    variant and try a quick differentiation (2nd-best captain / bench swap)."""
+    """Convergence guard (T1.7.5, formalized in T4.1): if a profile equals the
+    first one, try (1) 2nd-best-EP captain, (2) swap in a <25%-owned player;
+    if still identical, label it a variant of the first profile."""
     ordered = list(results.items())
     for i in range(1, len(ordered)):
         name, s = ordered[i]
         prev_name, prev = ordered[0]
         if lineup_key(s) == lineup_key(prev):
-            s.variant_of = prev_name
+            changed = _try_second_captain(s) or _try_low_own_swap(s)
+            if changed:
+                _rescore(s)
+            if lineup_key(s) == lineup_key(prev):
+                s.variant_of = prev_name
     return results

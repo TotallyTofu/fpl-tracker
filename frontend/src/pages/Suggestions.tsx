@@ -86,6 +86,7 @@ export default function Suggestions() {
                 <option key={l.id} value={l.id}>
                   {l.name}
                   {l.is_current ? " ★" : ""}
+                  {l.kind === "test" ? " ⚗" : ""}
                 </option>
               ))}
             </select>
@@ -112,10 +113,22 @@ export default function Suggestions() {
           </button>
         </div>
         {error && <div className="err" style={{ marginTop: 8 }}>{error}</div>}
+        {lineups.find((l) => l.id === lineupId)?.kind === "test" && (
+          <div className="small muted" style={{ marginTop: 8 }}>
+            ⚗ Generating against a <b>test lineup</b> — sandbox copy, apply is disabled.
+          </div>
+        )}
       </div>
 
       {cards.map((s) => (
-        <SuggestionCard key={s.id} s={s} />
+        <SuggestionCard
+          key={s.id}
+          s={s}
+          canApply={lineups.find((l) => l.id === lineupId)?.kind !== "test"}
+          onApplied={() => {
+            if (lineupId !== "") loadHistory(lineupId);
+          }}
+        />
       ))}
 
       {history.length > 0 && (

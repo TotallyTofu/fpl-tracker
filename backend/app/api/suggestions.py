@@ -81,8 +81,13 @@ async def generate(body: dict) -> dict:
         if s is None:
             continue
         diff = tmath.compute_diff(current_squad, s.squad, lineup["transfer_bank"], chips)
-        advice = tmath.chip_advice_v1(diff, chips, season["current_gw"], season["next_gw"],
-                                      settings.config)
+        try:
+            advice = tmath.chip_advice_v2(diff, chips, s, season["current_gw"],
+                                          season["next_gw"], settings.config, signals)
+        except Exception:
+            log.exception("chip_advice_v2 failed — falling back to v1")
+            advice = tmath.chip_advice_v1(diff, chips, season["current_gw"],
+                                          season["next_gw"], settings.config)
         rationale = {
             "per_player": {},
             "notes": s.notes,
@@ -136,6 +141,12 @@ async def list_suggestions(lineup_id: int | None = None) -> dict:
     for r in rows:
         for k in ("projected_points", "diff", "chip_advice", "rationale", "raw_lineup"):
             r[k] = json.loads(r[k])
+        raw = r.pop("raw_lineup")
+        # New rows store the full lineup payload; legacy rows store a bare squad list.
+        if isinstance(raw, list):
+            r["lineup"] = {"squad": raw, "xi": [], "captain": None, "vice_captain": None, "bench": []}
+        else:
+            r["lineup"] = raw
     return {"suggestions": rows}
 
 
@@ -145,3 +156,32 @@ async def delete_suggestion(sid: int) -> dict:
         raise HTTPException(404, "suggestion not found")
     execute("DELETE FROM suggestions WHERE id = ?", (sid,))
     return {"deleted": sid}
+
+
+@router.post("/suggestions/{sid}/apply")
+async def apply_suggestion(sid: int) -> dict:
+    """T4.2: mark a suggestion applied — set the lineup's bank to the diff's
+    bank_after and log any chips the advice said to 'use' into chip_plays_log
+    (this is what later drives the Free-Hit consecutive-GW ban)."""
+    row = query_one("SELECT * FROM suggestions WHERE id = ?", (sid,))
+    if not row:
+        raise HTTPException(404, "suggestion not found")
+    if row["applied_at"]:
+        return {"applied": sid, "already": True,
+                "bank_after": json.loads(row["diff"])["bank_after"], "chips_logged": []}
+    diff = json.loads(row["diff"])
+    advice = json.loads(row["chip_advice"])
+    ts = now_utc()
+    execute("UPDATE lineups SET transfer_bank = ? WHERE id = ?",
+            (diff["bank_after"], row["lineup_id"]))
+    logged: list[str] = []
+    for c in advice:
+        if c.get("recommendation") == "use":
+            execute(
+                "INSERT OR IGNORE INTO chip_plays_log (lineup_id, gw, chip, played_at) "
+                "VALUES (?,?,?,?)",
+                (row["lineup_id"], row["target_gw"], c["chip"], ts),
+            )
+            logged.append(c["chip"])
+    execute("UPDATE suggestions SET applied_at = ? WHERE id = ?", (ts, sid))
+    return {"applied": sid, "bank_after": diff["bank_after"], "chips_logged": logged}

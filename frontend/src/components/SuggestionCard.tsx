@@ -1,7 +1,21 @@
+import { useState } from "react";
+import { api } from "../api";
 import ApplyChecklist from "./ApplyChecklist";
 import DiffTable from "./DiffTable";
 import PitchView from "./PitchView";
-import type { Suggestion } from "../types";
+import type { LineupPlayer, Suggestion } from "../types";
+import { fmtTime } from "../types";
+
+function DiffEdge({ squad }: { squad: LineupPlayer[] }) {
+  const starters = squad.filter((p) => p.role === "starter");
+  const low = starters.filter((p) => (p.selected_by_percent ?? 100) < 10);
+  if (starters.length === 0) return null;
+  return (
+    <div style={{ marginTop: 4 }}>
+      🎯 Mini-league edge: {low.length} of {starters.length} starters owned by &lt;10% of the FPL public
+    </div>
+  );
+}
 
 const DESC: Record<string, string> = {
   max_ep: "Highest projected points for the target GW",
@@ -16,8 +30,34 @@ const CHIP_LABELS: Record<string, string> = {
   triple_captain: "Triple Captain",
 };
 
-export default function SuggestionCard({ s }: { s: Suggestion }) {
+export default function SuggestionCard({
+  s,
+  canApply = true,
+  onApplied,
+}: {
+  s: Suggestion;
+  canApply?: boolean;
+  onApplied?: () => void;
+}) {
   const proj = s.projected_points;
+  const [applying, setApplying] = useState(false);
+  const [applyErr, setApplyErr] = useState<string | null>(null);
+  const [appliedAt, setAppliedAt] = useState<string | null>(s.applied_at ?? null);
+
+  const apply = async () => {
+    setApplying(true);
+    setApplyErr(null);
+    try {
+      await api.applySuggestion(s.id);
+      setAppliedAt(new Date().toISOString());
+      onApplied?.();
+    } catch (e) {
+      setApplyErr(String(e));
+    } finally {
+      setApplying(false);
+    }
+  };
+
   return (
     <div className="panel">
       <div className="card-header">
@@ -31,6 +71,7 @@ export default function SuggestionCard({ s }: { s: Suggestion }) {
       </div>
       <div className="small muted" style={{ marginBottom: 10 }}>
         {DESC[s.profile] ?? ""}
+        {s.profile === "differential" && <DiffEdge squad={s.lineup.squad} />}
       </div>
       <PitchView players={s.lineup.squad} compact />
       <div style={{ marginTop: 12 }}>
@@ -56,6 +97,20 @@ export default function SuggestionCard({ s }: { s: Suggestion }) {
       )}
       <div style={{ marginTop: 10 }}>
         <ApplyChecklist s={s} />
+      </div>
+      <div className="row" style={{ marginTop: 12, alignItems: "center" }}>
+        {appliedAt ? (
+          <span className="badge use">✓ applied {fmtTime(appliedAt)}</span>
+        ) : canApply ? (
+          <button onClick={apply} disabled={applying}>
+            {applying ? "Applying…" : "Apply this suggestion"}
+          </button>
+        ) : (
+          <span className="small muted">
+            ⚗ Test lineup — apply is disabled (it would only affect the sandbox).
+          </span>
+        )}
+        {applyErr && <span className="err small">{applyErr}</span>}
       </div>
     </div>
   );

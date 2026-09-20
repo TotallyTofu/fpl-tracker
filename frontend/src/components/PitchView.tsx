@@ -47,8 +47,8 @@ export default function PitchView({ players, selectedId, onSelect, compact }: Pr
         </div>
       )}
       <div className="ptags">
-        {p.is_captain && <span className="badge c">C</span>}{" "}
-        {p.is_vice_captain && <span className="badge vc">VC</span>} {statusBadge(p)}
+        {p.is_captain ? <span className="badge c">C</span> : null}{" "}
+        {p.is_vice_captain ? <span className="badge vc">VC</span> : null} {statusBadge(p)}
       </div>
     </div>
   );

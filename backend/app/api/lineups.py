@@ -28,7 +28,13 @@ class LineupIn(BaseModel):
     chips: dict[str, int] = Field(
         default_factory=lambda: {"wildcard": 2, "freehit": 2, "bboost": 2, "triple_captain": 2}
     )
+    kind: Literal["current", "test"] = "current"  # T4.3: test lineups are sandbox copies
     players: list[LineupPlayerIn]
+
+
+class ChipPlayIn(BaseModel):
+    gw: int = Field(ge=1, le=99)
+    chip: Literal["wildcard", "freehit", "bboost", "triple_captain"]
 
 
 def _load_lineup(lid: int) -> dict | None:
@@ -77,10 +83,38 @@ def _load_lineup(lid: int) -> dict | None:
 
 @router.get("/lineups")
 async def list_lineups() -> dict:
-    rows = query("SELECT id, name, transfer_bank, chips, is_current, created_at, updated_at FROM lineups ORDER BY id")
+    rows = query("SELECT id, name, transfer_bank, chips, is_current, kind, created_at, updated_at FROM lineups ORDER BY id")
     for r in rows:
         r["chips"] = json.loads(r["chips"])
     return {"lineups": rows}
+
+
+@router.get("/lineups/chip-plays")
+async def list_chip_plays(gw: int | None = None) -> dict:
+    """T4.2/T4.3: chips the user played, per GW (drives the Free-Hit ban)."""
+    if gw is not None:
+        rows = query("SELECT gw, chip, played_at FROM chip_plays_log WHERE gw = ? ORDER BY chip", (gw,))
+    else:
+        rows = query("SELECT gw, chip, played_at FROM chip_plays_log ORDER BY gw DESC, chip")
+    return {"chip_plays": rows}
+
+
+@router.post("/lineups/chip-play", status_code=201)
+async def log_chip_play(body: ChipPlayIn) -> dict:
+    execute(
+        "INSERT OR IGNORE INTO chip_plays_log (lineup_id, gw, chip, played_at) VALUES (NULL,?,?,?)",
+        (body.gw, body.chip, now_utc()),
+    )
+    return {"logged": {"gw": body.gw, "chip": body.chip}}
+
+
+@router.delete("/lineups/chip-play")
+async def unlog_chip_play(gw: int, chip: str) -> dict:
+    if chip not in ("wildcard", "freehit", "bboost", "triple_captain"):
+        raise HTTPException(422, "unknown chip")
+    existed = query_one("SELECT 1 AS x FROM chip_plays_log WHERE gw = ? AND chip = ?", (gw, chip))
+    execute("DELETE FROM chip_plays_log WHERE gw = ? AND chip = ?", (gw, chip))
+    return {"deleted": bool(existed)}
 
 
 @router.post("/lineups", status_code=201)
@@ -88,8 +122,9 @@ async def create_lineup(body: LineupIn) -> dict:
     _validate_in(body)
     ts = now_utc()
     lid = execute(
-        "INSERT INTO lineups (name, transfer_bank, chips, is_current, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-        (body.name, body.transfer_bank, json.dumps(body.chips), 0, ts, ts),
+        "INSERT INTO lineups (name, transfer_bank, chips, is_current, kind, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (body.name, body.transfer_bank, json.dumps(body.chips), 0, body.kind, ts, ts),
     )
     _save_players(lid, body)
     out = _load_lineup(lid)
@@ -113,8 +148,8 @@ async def update_lineup(lid: int, body: LineupIn) -> dict:
         raise HTTPException(404, "lineup not found")
     _validate_in(body)
     execute(
-        "UPDATE lineups SET name = ?, transfer_bank = ?, chips = ?, updated_at = ? WHERE id = ?",
-        (body.name, body.transfer_bank, json.dumps(body.chips), now_utc(), lid),
+        "UPDATE lineups SET name = ?, transfer_bank = ?, chips = ?, kind = ?, updated_at = ? WHERE id = ?",
+        (body.name, body.transfer_bank, json.dumps(body.chips), body.kind, now_utc(), lid),
     )
     execute("DELETE FROM lineup_players WHERE lineup_id = ?", (lid,))
     _save_players(lid, body)
@@ -136,6 +171,39 @@ async def set_current(lid: int) -> dict:
     conn = execute("UPDATE lineups SET is_current = 0 WHERE is_current = 1")
     execute("UPDATE lineups SET is_current = 1 WHERE id = ?", (lid,))
     return {"current": lid}
+
+
+@router.post("/lineups/{lid}/duplicate", status_code=201)
+async def duplicate_lineup(lid: int, body: dict | None = None) -> dict:
+    """T4.3: sandbox copy of a lineup — same squad/bank/chips, kind='test',
+    not current. Suggestions run against it without touching the real team."""
+    src = _load_lineup(lid)
+    if not src:
+        raise HTTPException(404, "lineup not found")
+    name = (body or {}).get("name") or f"{src['name']} (test)"
+    ts = now_utc()
+    new_id = execute(
+        "INSERT INTO lineups (name, transfer_bank, chips, is_current, kind, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (name[:100], src["transfer_bank"], json.dumps(src["chips"]), 0, "test", ts, ts),
+    )
+    _save_players(
+        new_id,
+        LineupIn(
+            name=name[:100],
+            transfer_bank=src["transfer_bank"],
+            chips=src["chips"],
+            kind="test",
+            players=[
+                LineupPlayerIn(
+                    player_id=p["player_id"], role=p["role"], bench_order=p["bench_order"],
+                    is_captain=p["is_captain"], is_vice_captain=p["is_vice_captain"],
+                )
+                for p in src["players"]
+            ],
+        ),
+    )
+    return _load_lineup(new_id)
 
 
 @router.post("/lineups/match-names")

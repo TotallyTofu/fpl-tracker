@@ -141,3 +141,75 @@ def test_settings_get(client):
 def test_refresh_unknown_source_404(client):
     r = client.post("/api/refresh/nope")
     assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# M4 T4.2 / T4.3 — apply suggestion, chip-play log, lineup kind + duplicate
+# ---------------------------------------------------------------------------
+
+def test_suggestions_apply_endpoint(client):
+    lid = client.post("/api/lineups", json=VALID_BODY).json()["id"]
+    r = client.post("/api/suggestions/generate", json={"lineup_id": lid})
+    assert r.status_code == 200, r.text
+    sugs = r.json()["suggestions"]
+    assert sugs
+    sug = next(s for s in sugs if s["profile"] == "max_ep")
+    bank_before = VALID_BODY["transfer_bank"]
+
+    r = client.post(f"/api/suggestions/{sug['id']}/apply")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["applied"] == sug["id"]
+    assert body["bank_after"] == sug["diff"]["bank_after"]
+
+    # lineup bank updated
+    r = client.get(f"/api/lineups/{lid}")
+    assert r.json()["transfer_bank"] == sug["diff"]["bank_after"]
+
+    # idempotent second call
+    r = client.post(f"/api/suggestions/{sug['id']}/apply")
+    assert r.status_code == 200
+    assert r.json().get("already") is True
+
+    assert bank_before >= 1  # sanity: bank was in range
+
+
+def test_chip_play_endpoints(client):
+    r = client.post("/api/lineups/chip-play", json={"gw": 5, "chip": "freehit"})
+    assert r.status_code == 201, r.text
+
+    r = client.get("/api/lineups/chip-plays", params={"gw": 5})
+    assert r.status_code == 200
+    assert any(p["gw"] == 5 and p["chip"] == "freehit" for p in r.json()["chip_plays"])
+
+    r = client.delete("/api/lineups/chip-play", params={"gw": 5, "chip": "freehit"})
+    assert r.status_code == 200
+    assert r.json()["deleted"] is True
+
+    # second delete: nothing left
+    r = client.delete("/api/lineups/chip-play", params={"gw": 5, "chip": "freehit"})
+    assert r.json()["deleted"] is False
+
+    # unknown chip rejected
+    r = client.post("/api/lineups/chip-play", json={"gw": 5, "chip": "time_travel"})
+    assert r.status_code == 422
+
+
+def test_lineup_kind_default_and_duplicate(client):
+    lid = client.post("/api/lineups", json=VALID_BODY).json()["id"]
+    r = client.get(f"/api/lineups/{lid}")
+    assert r.json()["kind"] == "current"
+
+    r = client.post(f"/api/lineups/{lid}/duplicate")
+    assert r.status_code == 201, r.text
+    dup = r.json()
+    assert dup["kind"] == "test"
+    assert dup["is_current"] == 0
+    assert len(dup["players"]) == 15
+    assert dup["transfer_bank"] == VALID_BODY["transfer_bank"]
+
+    # explicit kind on create
+    body = dict(VALID_BODY, name="Sandbox", kind="test")
+    r = client.post("/api/lineups", json=body)
+    assert r.status_code == 201
+    assert r.json()["kind"] == "test"

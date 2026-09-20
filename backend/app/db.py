@@ -178,6 +178,7 @@ CREATE TABLE IF NOT EXISTS lineups (
   transfer_bank INTEGER NOT NULL DEFAULT 1,
   chips TEXT NOT NULL DEFAULT '{}',            -- JSON {chip_name: sets_remaining}
   is_current INTEGER NOT NULL DEFAULT 0,
+  kind TEXT NOT NULL DEFAULT 'current',        -- T4.3: current | test
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -205,7 +206,8 @@ CREATE TABLE IF NOT EXISTS suggestions (
   diff TEXT NOT NULL,                          -- JSON (see PLAN.MD §8.6)
   chip_advice TEXT NOT NULL,                   -- JSON list
   rationale TEXT NOT NULL,                     -- JSON {per_player: {}, notes: []}
-  raw_lineup TEXT NOT NULL                     -- JSON full lineup (audit snapshot)
+  raw_lineup TEXT NOT NULL,                    -- JSON full lineup (audit snapshot)
+  applied_at TEXT                              -- T4.2: set when the user marks it applied
 );
 
 CREATE TABLE IF NOT EXISTS raw_items (
@@ -421,6 +423,14 @@ def init_db(path: str | Path | None = None) -> None:
         cache = _table_columns(conn, "official_news_cache")
         if cache and not {"chance", "updated_at"} <= cache:
             conn.execute("DROP TABLE official_news_cache")
+        # M4 migration: suggestions.applied_at (additive, safe on existing data)
+        sugg = _table_columns(conn, "suggestions")
+        if sugg and "applied_at" not in sugg:
+            conn.execute("ALTER TABLE suggestions ADD COLUMN applied_at TEXT")
+        # M4 migration: lineups.kind (additive; existing rows default to 'current')
+        lup = _table_columns(conn, "lineups")
+        if lup and "kind" not in lup:
+            conn.execute("ALTER TABLE lineups ADD COLUMN kind TEXT NOT NULL DEFAULT 'current'")
         conn.executescript(SCHEMA)
         conn.commit()
     finally:

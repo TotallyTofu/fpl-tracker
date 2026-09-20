@@ -93,6 +93,22 @@ export const api = {
     req<Lineup>(`/lineups/${id}`, { method: "PUT", body: JSON.stringify(body) }),
   deleteLineup: (id: number) => req<{ deleted: number }>(`/lineups/${id}`, { method: "DELETE" }),
   setCurrent: (id: number) => req<{ current: number }>(`/lineups/${id}/set-current`, { method: "POST" }),
+  duplicateLineup: (id: number, name?: string) =>
+    req<Lineup>(`/lineups/${id}/duplicate`, {
+      method: "POST",
+      body: JSON.stringify(name ? { name } : {}),
+    }),
+  getChipPlays: (gw?: number) =>
+    req<{ chip_plays: { gw: number; chip: string; played_at: string }[] }>(
+      `/lineups/chip-plays${gw ? `?gw=${gw}` : ""}`
+    ),
+  logChipPlay: (gw: number, chip: string) =>
+    req<{ logged: { gw: number; chip: string } }>("/lineups/chip-play", {
+      method: "POST",
+      body: JSON.stringify({ gw, chip }),
+    }),
+  unlogChipPlay: (gw: number, chip: string) =>
+    req<{ deleted: boolean }>(`/lineups/chip-play?gw=${gw}&chip=${chip}`, { method: "DELETE" }),
   matchNames: (names: string[]) =>
     req<{ matches: NameMatch[] }>("/lineups/match-names", {
       method: "POST",
@@ -109,6 +125,11 @@ export const api = {
       `/suggestions${lineupId ? `?lineup_id=${lineupId}` : ""}`
     ),
   deleteSuggestion: (id: number) => req<{ deleted: number }>(`/suggestions/${id}`, { method: "DELETE" }),
+  applySuggestion: (id: number) =>
+    req<{ applied: number; already?: boolean; bank_after: number; chips_logged: string[] }>(
+      `/suggestions/${id}/apply`,
+      { method: "POST" }
+    ),
 
   getSettings: () => req<SettingsResponse>("/settings"),
   putSettings: (body: unknown) => req<SettingsResponse>("/settings", { method: "PUT", body: JSON.stringify(body) }),

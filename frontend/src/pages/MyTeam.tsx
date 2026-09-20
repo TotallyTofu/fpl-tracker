@@ -22,6 +22,12 @@ interface Draft {
 
 // chips in hand default to 0; the stepper caps at 2 (FPL max per season)
 const EMPTY_CHIPS = { wildcard: 0, freehit: 0, bboost: 0, triple_captain: 0 };
+const CHIP_LABEL: Record<string, string> = {
+  wildcard: "Wildcard",
+  freehit: "Free Hit",
+  bboost: "Bench Boost",
+  triple_captain: "3× Captain",
+};
 
 function toDraft(l: Lineup): Draft {
   return {
@@ -93,11 +99,26 @@ export default function MyTeam() {
   const [sortKey, setSortKey] = useState<SortKey>("element_type");
   const [sortDir, setSortDir] = useState(1);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [chipPlays, setChipPlays] = useState<{ gw: number; chip: string }[]>([]);
 
   const refreshLineups = useCallback(() => {
     api.listLineups().then((r) => setLineups(r.lineups)).catch(() => {});
   }, []);
   useEffect(refreshLineups, [refreshLineups]);
+
+  // T4.3: chips the user actually played this GW (drives the Free-Hit ban)
+  const loadChipPlays = useCallback(() => {
+    if (!season?.current_gw) return;
+    api.getChipPlays(season.current_gw).then((r) => setChipPlays(r.chip_plays)).catch(() => {});
+  }, [season]);
+  useEffect(loadChipPlays, [loadChipPlays]);
+  const toggleChip = (chip: string) => {
+    const gw = season?.current_gw;
+    if (!gw) return;
+    const on = chipPlays.some((c) => c.chip === chip);
+    const p = on ? api.unlogChipPlay(gw, chip) : api.logChipPlay(gw, chip);
+    p.then(loadChipPlays).catch(() => {});
+  };
 
   // load the current lineup on first mount
   useEffect(() => {
@@ -306,12 +327,64 @@ export default function MyTeam() {
     });
   };
 
+  // T4.3: tab menu actions
+  const renameLineup = (id: number, name: string) => {
+    api
+      .getLineup(id)
+      .then((l) =>
+        api.updateLineup(id, {
+          name,
+          transfer_bank: l.transfer_bank,
+          chips: l.chips,
+          kind: l.kind,
+          players: l.players.map((p) => ({
+            player_id: p.player_id,
+            role: p.role,
+            bench_order: p.bench_order,
+            is_captain: p.is_captain,
+            is_vice_captain: p.is_vice_captain,
+          })),
+        })
+      )
+      .then(refreshLineups)
+      .catch(() => {});
+  };
+
+  const duplicateLineup = (id: number) => {
+    api
+      .duplicateLineup(id)
+      .then((l) => {
+        refreshLineups();
+        setDraft(toDraft(l));
+        setSelectedId(null);
+      })
+      .catch(() => {});
+  };
+
+  const deleteLineupById = (id: number) => {
+    if (!confirm("Delete this lineup?")) return;
+    api.deleteLineup(id).then(() => {
+      refreshLineups();
+      if (draft.id === id) newLineup();
+    });
+  };
+
   const benchCount = draft.players.filter((p) => p.role === "bench").length;
 
   return (
     <div>
       <h1>My Team</h1>
-      <LineupTabs lineups={lineups} activeId={draft.id} onSelect={loadLineup} onNew={newLineup} />
+      <LineupTabs
+        lineups={lineups}
+        activeId={draft.id}
+        onSelect={loadLineup}
+        onNew={newLineup}
+        onRename={renameLineup}
+        onDuplicate={duplicateLineup}
+        onDelete={deleteLineupById}
+        onSetCurrent={(id) => api.setCurrent(id).then(refreshLineups)}
+        onSuggest={(id) => nav("/suggestions", { state: { lineup_id: id } })}
+      />
       <div className="grid2">
         <div>
           <PasteBox onLoad={loadMatched} />
@@ -353,8 +426,8 @@ export default function MyTeam() {
                       <td>{p.selected_by_percent != null ? p.selected_by_percent.toFixed(1) : "—"}</td>
                       <td className="small muted">
                         {p.role === "bench" ? `bench ${p.bench_order ?? "?"}` : "XI"}
-                        {p.is_captain && " C"}
-                        {p.is_vice_captain && " VC"}
+                        {p.is_captain ? " C" : ""}
+                        {p.is_vice_captain ? " VC" : ""}
                       </td>
                     </tr>
                   ))}
@@ -388,6 +461,33 @@ export default function MyTeam() {
           <PitchView players={draft.players} selectedId={selectedId} onSelect={selectPlayer} />
         </div>
       </div>
+      {season && (
+        <div className="panel">
+          <h2 style={{ marginTop: 0 }}>Chips used — GW {season.current_gw}</h2>
+          <div className="row" style={{ flexWrap: "wrap", gap: 14 }}>
+            {Object.keys(EMPTY_CHIPS).map((chip) => {
+              const on = chipPlays.some((c) => c.chip === chip);
+              return (
+                <label
+                  key={chip}
+                  className="chip-toggle"
+                  title={
+                    chip === "freehit"
+                      ? "Logging a Free Hit here stops the app from suggesting another one next GW (consecutive-GW ban)"
+                      : "Record that you played this chip this GW"
+                  }
+                >
+                  <input type="checkbox" checked={on} onChange={() => toggleChip(chip)} />
+                  {CHIP_LABEL[chip]}
+                </label>
+              );
+            })}
+          </div>
+          <p className="small muted" style={{ marginBottom: 0 }}>
+            Keep this in sync with FPL so chip advice (Free-Hit ban, chip windows) stays accurate.
+          </p>
+        </div>
+      )}
       <MetaPanel
         name={draft.name}
         setName={(s) => patch((d) => ({ ...d, name: s }))}

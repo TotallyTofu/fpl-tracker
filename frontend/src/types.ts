@@ -83,6 +83,7 @@ export interface Lineup {
   transfer_bank: number;
   chips: Record<string, number>;
   is_current: number;
+  kind: "current" | "test";
   created_at: string;
   updated_at: string;
   players: LineupPlayer[];
@@ -96,6 +97,7 @@ export interface LineupSummary {
   transfer_bank: number;
   chips: Record<string, number>;
   is_current: number;
+  kind: "current" | "test";
   created_at: string;
   updated_at: string;
 }
@@ -148,6 +150,7 @@ export interface Suggestion {
   chip_advice: ChipAdvice[];
   rationale: { per_player: Record<string, string>; notes: string[] };
   lineup: SuggestedLineup;
+  applied_at: string | null;
 }
 
 export interface MatchedPlayer {

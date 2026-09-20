@@ -36,8 +36,8 @@ export default function TeamStrip() {
                   {POS_SHORT[p.element_type]} · {cost(p.now_cost)}
                 </div>
                 <div className="ptags">
-                  {p.is_captain && <span className="badge c">C</span>}{" "}
-                  {p.is_vice_captain && <span className="badge vc">VC</span>}
+                  {p.is_captain ? <span className="badge c">C</span> : null}{" "}
+                  {p.is_vice_captain ? <span className="badge vc">VC</span> : null}
                 </div>
               </div>
             ))}
