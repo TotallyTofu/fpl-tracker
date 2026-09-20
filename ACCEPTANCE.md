@@ -168,3 +168,50 @@ Executed 2026-09-20 against the live 2026/27 season. All 9 items **PASS**.
 
 AC1–AC5, AC6 (adjusted), AC8 **PASS**; AC7 **SKIPPED** (user decision).
 Season rollover dry pass **9/9 PASS**. → **v1.0.0** (2026-09-20).
+
+## Retrospective (v1.0.0)
+
+**Timeline**: M1 2026-09-19, M2 + M3-revised + M4 all 2026-09-20 — four
+milestones in two days, 139 tests, 97 tracked files.
+
+**What worked**
+
+- The plan-first approach: PLAN.MD §5 (rules) was verified against the live
+  API before any code was written, so the solver never had to be "fixed for
+  reality" — the season-rollover dry pass (9/9) re-confirmed this a week
+  later.
+- Deterministic solver (seed 42) made every acceptance re-run reproducible
+  and diffed cleanly between M1 → M4.
+- The M3 scope change (live SSE polling → startup full-refresh + banner)
+  simplified the app materially: no live pollers, no SSE, one background
+  task, persisted refresh state. The revised scope is what the user wanted
+  ("everything pulled when I open the program").
+- Launcher hardening (fresh-clone simulation) caught three real failure
+  modes before v1.0.0: PS 5.1 UTF-8-no-BOM parse bug, npm EPERM in
+  restricted environments, missing Python/Node UX.
+
+**What cost extra**
+
+- Solver convergence needed three follow-up fixes (EP floor, second-captain
+  retry, low-own swap) before the differential profile stopped collapsing —
+  budget ~2× the original estimate for T4.1.
+- Windows/PowerShell environment quirks (TLS blocks, sandbox EPERM, encoding)
+  ate real time; all workarounds are now documented in the launchers +
+  README troubleshooting.
+
+**Known limitations carried forward**
+
+- Group-rank card (AC7/T4.4) — out of scope, spec preserved in
+  `PLAN-5-M4-POLISH.MD`.
+- Yahoo news — unsupported in v1 (API hosts don't resolve); ESPN covers
+  live data when enabled.
+- Reddit thread bodies are title-only under 429 pressure (breaker by
+  design); OAuth mode raises the limits.
+- `live_matches` / `live_player_points` tables exist but are unused (M3
+  revision); safe to drop in a future cleanup.
+
+**Daily loop (v1.0.0)**: open `http://127.0.0.1:8000` → wait for the
+startup-refresh banner → Dashboard → My Team (paste/pick, save, test
+lineups) → Suggestions (3 profiles, diffs, chips, apply checklist) → News
+(signals + sources) → Settings (any knob) → copy the checklist into the
+official FPL site before the deadline.
