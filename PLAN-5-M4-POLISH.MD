@@ -168,7 +168,19 @@ AC7 is therefore out of scope for T4.9. Implementation below is kept for a futur
 
 ---
 
-## T4.8 — Final README + open-item closure
+## T4.8 — Final README + open-item closure — DONE (2026-09-20)
+
+> Status: complete. `README.md` rewritten with all 9 spec sections (+ kept
+> Using-the-app / Architecture / Development). Chip-advice paragraph corrected
+> to match `chip_advice_v2` actual thresholds (wildcard use when transfers >
+> bank; free-hit consider + consecutive ban; 3XC at EP ≥ 8.5 or ≥ 7.0 +
+> confirmed-starter signal; bboost when bench EP ≥ 0.5× XI avg). **Yahoo
+> closure**: both JSON API hosts fail DNS (verified 2026-09-20) → documented
+> in the sources table as "unsupported in v1, ESPN covers live data"; no
+> `yahoo.py` stub ever existed (nothing to delete). **Reddit OAuth**: user
+> chose **prominent standalone section** (2026-09-20) — "## Reddit OAuth
+> (optional upgrade)" now sits between LLM setup and How suggestions work.
+> Every README command re-run on 2026-09-20 (AC8).
 
 **Goal**: AC8 + close PLAN.MD §13 open items.
 
@@ -189,7 +201,13 @@ AC7 is therefore out of scope for T4.9. Implementation below is kept for a futur
 
 ---
 
-## T4.9 — Full acceptance run (AC1–AC8)
+## T4.9 — Full acceptance run (AC1–AC8) — DONE (2026-09-20)
+
+> Status: complete. `ACCEPTANCE.md` written: AC1–AC5, AC6 (adjusted to the
+> revised M3 scope), AC8 all PASS with evidence; AC7 SKIPPED (user decision,
+> group-rank card not in v1). New evidence captured this session: dev-mode
+> smoke via `start.ps1 -Dev` (vite :5173 + proxy), `dev_check.py`
+> `DEV CHECK PASSED`, pytest 139 green.
 
 **Goal**: execute PLAN.MD §1 success criteria one by one; record results in `ACCEPTANCE.md` (new file: criterion, method, evidence, pass/fail, date) and in the final commit message.
 
@@ -207,7 +225,15 @@ AC7 is therefore out of scope for T4.9. Implementation below is kept for a futur
 
 ---
 
-## T4.10 — Season-rollover checklist (for the user + future maintenance)
+## T4.10 — Season-rollover checklist (for the user + future maintenance) — DONE (2026-09-20)
+
+> Status: complete. README §"New season" written (9-item checklist). Dry pass
+> executed against the live 2026/27 season on 2026-09-20 — **9/9 PASS**,
+> recorded in `ACCEPTANCE.md` (rules page fetched live via browser with all
+> accordions expanded; scoring + BPS tables row-by-row match PLAN.MD
+> §5.9/§5.10; transfers/captaincy/chips re-verified; 20 teams, 667 players
+> 2/5/5/3-shaped universe, prices £3.9–15.6m; chip table 8 rows = 2 sets × 4;
+> yt-dlp 2026.8.19 ~1 month old; GW1 deadline 2026-08-21T17:30:00Z from API).
 
 **Goal**: the app is season-agnostic (D9/API-driven), but a few human re-checks happen each August. Write this into README §"New season" and run it proactively in T4.9 as a dry pass.
 
