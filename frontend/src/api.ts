@@ -10,6 +10,7 @@ import type {
   Season,
   SettingsResponse,
   Signal,
+  StartupRefreshState,
   Suggestion,
 } from "./types";
 
@@ -49,6 +50,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   getSeason: () => req<Season>("/meta/season"),
   getHealth: () => req<Health>("/meta/health"),
+  getStartupRefresh: () => req<StartupRefreshState>("/meta/startup-refresh"),
   refresh: (source: string) =>
     req<{ results: Record<string, string | { status: string; rows?: number; [k: string]: unknown }> }>(
       `/refresh/${source}`,

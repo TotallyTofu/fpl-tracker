@@ -240,6 +240,14 @@ export interface Health {
   schema_drift: string[];
 }
 
+export interface StartupRefreshState {
+  status: "idle" | "running" | "done";
+  started_at?: string;
+  finished_at?: string;
+  results?: Record<string, string | Record<string, unknown>>;
+  signals_stored?: number;
+}
+
 export const POS_NAME: Record<number, string> = { 1: "GK", 2: "DEF", 3: "MID", 4: "FWD" };
 export const POS_SHORT: Record<number, string> = { 1: "GK", 2: "D", 3: "M", 4: "F" };
 

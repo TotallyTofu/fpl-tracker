@@ -1,4 +1,5 @@
 import { NavLink, Route, Routes } from "react-router-dom";
+import StartupToast from "./components/StartupToast";
 import Dashboard from "./pages/Dashboard";
 import MyTeam from "./pages/MyTeam";
 import News from "./pages/News";
@@ -19,6 +20,7 @@ export default function App() {
   const { season } = useSeason();
   return (
     <div className="layout">
+      <StartupToast />
       <aside className="sidebar">
         <div className="logo">⚽ FPL Tracker</div>
         <nav>

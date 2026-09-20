@@ -1,16 +1,27 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import Countdown from "../components/Countdown";
 import TeamStrip from "../components/TeamStrip";
 import { useSeason } from "../hooks/useSeason";
-import { fmtTime } from "../types";
+import { fmtTime, type Signal } from "../types";
 
 export default function Dashboard() {
   const { season, error } = useSeason();
   const nav = useNavigate();
   const [refreshing, setRefreshing] = useState(false);
   const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
+  const [signals, setSignals] = useState<Signal[] | null>(null);
+
+  const loadSignals = () =>
+    api
+      .getSignals({ active: true })
+      .then((r) => setSignals(r.signals))
+      .catch(() => setSignals([]));
+
+  useEffect(() => {
+    loadSignals();
+  }, []);
 
   const refreshAll = async () => {
     setRefreshing(true);
@@ -19,9 +30,10 @@ export default function Dashboard() {
       const r = await api.refresh("all");
       setRefreshMsg(
         Object.entries(r.results)
-          .map(([k, v]) => `${k}: ${v}`)
+          .map(([k, v]) => (typeof v === "string" ? v : "ok"))
           .join(" · ")
       );
+      loadSignals();
     } catch (e) {
       setRefreshMsg(String(e));
     } finally {
@@ -66,9 +78,35 @@ export default function Dashboard() {
         </div>
         <div className="panel">
           <h2 style={{ marginTop: 0 }}>Signals</h2>
-          <div className="muted small">
-            No signals yet — the news pipeline (BBC / Reddit / YouTube / LLM) lands in M2.
-          </div>
+          {signals === null ? (
+            <div className="muted small">loading…</div>
+          ) : signals.length === 0 ? (
+            <div className="muted small">No active signals right now.</div>
+          ) : (
+            <>
+              <div className="small muted" style={{ marginBottom: 6 }}>
+                {signals.length} active
+              </div>
+              <ul className="sig-list">
+                {signals.slice(0, 5).map((s) => (
+                  <li key={s.id}>
+                    <span
+                      className="dot"
+                      style={{ background: s.sentiment === "negative" ? "var(--red)" : "var(--accent)" }}
+                    />
+                    <span className="sig-player">{s.web_name ?? `#${s.player_id}`}</span>
+                    <span className="badge skip">{s.category}</span>
+                    <span className="muted small">{Math.round(s.confidence * 100)}%</span>
+                  </li>
+                ))}
+              </ul>
+              {signals.length > 5 && (
+                <button className="ghost small" onClick={() => nav("/news")} style={{ marginTop: 6 }}>
+                  See all {signals.length} →
+                </button>
+              )}
+            </>
+          )}
         </div>
       </div>
 

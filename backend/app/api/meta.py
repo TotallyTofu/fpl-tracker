@@ -10,6 +10,7 @@ from .. import season as season_svc
 from ..config import ConfigFile, load_settings, save_config
 from ..db import recent_polls
 from ..fetchers import fpl as fpl_fetcher
+from ..startup import refresh_one
 
 log = logging.getLogger("fpl.api.meta")
 router = APIRouter()
@@ -18,6 +19,14 @@ router = APIRouter()
 @router.get("/meta/season")
 async def get_season() -> dict:
     return season_svc.current_season()
+
+
+@router.get("/meta/startup-refresh")
+async def get_startup_refresh() -> dict:
+    """State of the boot-time full news refresh (idle/running/done)."""
+    from ..startup import get_startup_state
+
+    return get_startup_state()
 
 
 @router.get("/meta/health")
@@ -53,29 +62,8 @@ async def refresh(source: str) -> dict:
             if t == "fpl":
                 await fpl_fetcher.refresh_all_fpl()
                 results[t] = "ok"
-            elif t == "bbc":
-                from ..fetchers.bbc import refresh_bbc
-
-                results[t] = await refresh_bbc()
-            elif t == "espn":
-                if not cfg.sources.espn.enabled:
-                    results[t] = "skipped (espn disabled in settings)"
-                    continue
-                from ..fetchers.espn import refresh_espn
-
-                results[t] = await refresh_espn()
-            elif t == "reddit":
-                from ..fetchers.reddit import refresh_reddit
-
-                results[t] = await refresh_reddit(cfg)
-            elif t == "youtube":
-                from ..fetchers.youtube import refresh_youtube
-
-                before = {c.channel_id for c in cfg.sources.youtube.channels}
-                results[t] = await refresh_youtube(cfg)
-                after = {c.channel_id for c in cfg.sources.youtube.channels}
-                if after - before:  # handle→channel_id resolved this poll
-                    save_config(cfg)
+            else:
+                results[t] = await refresh_one(t, cfg)
         except Exception as e:
             log.exception("refresh %s failed", t)
             results[t] = f"error: {e}"

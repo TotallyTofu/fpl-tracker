@@ -1,10 +1,13 @@
 """FastAPI app: /api routers + static frontend (prod) + lifespan.
 
 Lifespan: init DB → one-time FPL fetch (so the UI has data immediately) →
-start scheduler (M1: stub; M3: full job table) → shutdown.
+start scheduler → kick off the full news refresh as a background task (M3
+revised: everything is fresh by the time the user finishes reading the
+Dashboard) → shutdown.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -39,11 +42,24 @@ async def lifespan(app: FastAPI):
     sched = create_scheduler(app)
     sched.start()
     app.state.scheduler = sched
+    # Full news refresh in the background: app is already serving FPL data;
+    # BBC/Reddit/YouTube + signal extraction land shortly after (UI polls
+    # /api/meta/startup-refresh and notifies when it finishes).
+    from .startup import run_full_refresh
+
+    app.state.startup_refresh = asyncio.create_task(run_full_refresh())
     yield
     try:
         sched.shutdown(wait=False)
     except Exception:
         pass
+    task = getattr(app.state, "startup_refresh", None)
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
     await http.aclose()
 
 

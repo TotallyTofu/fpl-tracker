@@ -27,9 +27,15 @@ Prereqs: Python 3.11+, Node 18+.
 
 The launcher is idempotent: it creates `.venv`, installs `backend/requirements.txt`
 (`pip --no-cache-dir`), runs `npm install` in `frontend/`, and runs `vite build`
-— each only if missing. On first start the app fetches the full FPL dataset
-(bootstrap: elements, fixtures, game settings, bootstrap-transfers) so the UI
-has data immediately.
+— each only if missing. On every start the app first fetches the full FPL
+dataset (bootstrap: elements, fixtures, game settings, bootstrap-transfers) so
+the UI has data immediately, then runs a **full news refresh in the background**
+(BBC + Reddit + YouTube + signal extraction; ESPN when enabled). A banner in
+the top-right shows the refresh in progress and then a completion summary
+("✅ News refresh complete — bbc: N rows · reddit: N rows · … · N signals
+stored") so you know everything is up to date the moment you open the app.
+Ongoing updates continue via the scheduler (FPL 15 min, BBC/Reddit 30 min,
+YouTube 60 min, extraction 10 min) and the manual refresh buttons.
 
 > Restricted/sandboxed environments: if `npm install` fails on a postinstall
 > spawn (esbuild), use `npm install --no-audit --no-fund --ignore-scripts`
@@ -59,8 +65,8 @@ has data immediately.
    rationale notes, and a manual apply checklist (sell first → buy → bench →
    XI → C/VC → bench order → chip).
 3. **Dashboard** — season state (current/next GW, deadline countdown, live
-   window), quick refresh of all sources, your current team strip, next-GW
-   fixtures.
+   window), quick refresh of all sources, a live **Signals** panel (top 5 active
+   signals, links to News), your current team strip, next-GW fixtures.
 4. **News** — the signal pipeline:
    - **Refresh sources** — per-source buttons (fpl / bbc / espn / reddit /
       youtube / All + extract). Each fetch stores items, then the extraction
@@ -165,6 +171,7 @@ backend/
     httpclient.py     shared httpx.AsyncClient
     scheduler.py      APScheduler (fpl 15m · bbc/espn/reddit 30m · youtube 60m · extract 10m)
     season.py         season state, chip windows, next-GW fixtures
+    startup.py        boot-time full news refresh (background task + state)
     fetchers/         fpl.py · bbc.py · espn.py · reddit.py · youtube.py
     signals/          ingest.py (dedupe store) · names.py (matcher) ·
                       rule_extractor.py (keyword backstop) · llm_extractor.py ·
@@ -172,14 +179,14 @@ backend/
     optimizer/        rules.py · scoring.py · solver.py · transfers.py
     api/              meta · players · lineups · suggestions · settings · news
   scripts/dev_check.py
-  tests/              116 tests (rules, EP, transfers, solver, names, API,
-                      signals rule/llm/ingest, fetchers, news API)
+  tests/              125 tests (rules, EP, transfers, solver, names, API,
+                      signals rule/llm/ingest, fetchers, news API, startup)
 frontend/
   src/
     pages/            Dashboard · MyTeam · Suggestions · News · Settings
     components/       PitchView · PlayerPicker · PasteBox · ValidationPanel ·
                       MetaPanel · LineupTabs · DiffTable · ApplyChecklist ·
-                      SuggestionCard · Countdown · TeamStrip
+                      SuggestionCard · Countdown · TeamStrip · StartupToast
     api.ts · types.ts · rules.ts (client mirror) · hooks/
 data/                 fpl.db (gitignored)
 ```
@@ -188,7 +195,7 @@ data/                 fpl.db (gitignored)
 
 ```powershell
 cd backend
-..\.venv\Scripts\python -m pytest tests -q     # 116 tests, no network needed
+..\.venv\Scripts\python -m pytest tests -q     # 125 tests, no network needed
 ..\.venv\Scripts\python scripts\dev_check.py   # live end-to-end smoke check
 ```
 
@@ -207,6 +214,11 @@ suggestions, SQLite for zero-ops local storage.
   When a signal hits a player in the suggested XI, the rationale notes it
   ("Signal applied: …"). `safe` can now diverge from `max_ep` (doubt/50%
   players and negative signals are priced differently).
+- **M3 (revised)**: instead of a real-time SSE / live-match dashboard, the app
+   does a **full news refresh on every start** (background task, right after the
+   synchronous FPL bootstrap) and shows a completion banner. Live scores /
+   in-play polling were dropped per project scope; the season state still
+   reports `live_mode` / `live_window` from the fixtures.
 - LLM transcripts are **auto-captions only** (yt-dlp `--write-auto-sub`),
   budgeted to 3 videos per poll, and only used by the LLM path — the rule
   path reads YouTube title+description only (caption noise would confuse it).
