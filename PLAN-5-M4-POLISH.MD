@@ -72,7 +72,11 @@ def chip_advice_v2(diff, chips, lineup, next_gw, cfg) -> list[dict]:
 
 ---
 
-## T4.4 — Optional entry-ID group-rank card (AC7)
+## T4.4 — Optional entry-ID group-rank card (AC7) — SKIPPED
+
+**Status: SKIPPED (user chose "skip" on 2026-09-20 — no public entry ID provided).**
+The card stays hidden with `group.fpl_entry_id` empty (default); no errors, no UI surface.
+AC7 is therefore out of scope for T4.9. Implementation below is kept for a future season if the user opts in.
 
 **Goal**: public rank display (D8, outline §5.4) — no login, public endpoint only.
 
@@ -88,7 +92,14 @@ def chip_advice_v2(diff, chips, lineup, next_gw, cfg) -> list[dict]:
 
 ---
 
-## T4.5 — Settings page (full)
+## T4.5 — Settings page (full) — DONE (2026-09-20)
+
+> Status: complete. All six sections shipped in `Settings.tsx` (single-page; `SettingsSections.tsx` folded in as
+> section blocks). Backend additions: `POST /api/signals/clear`, `GET /api/meta/db-stats`, `pulp_available` in
+> `GET /settings`. Save round-trip browser-verified (edit → save → persists to `config.json` on disk → reload).
+> Deviations: Group "Test" button omitted (T4.4 entry API skipped); "Re-fetch all now" uses existing
+> `POST /api/refresh/all`; YouTube "resolve" is server-side (fetcher resolves handle→channel_id on first poll,
+> so the UI only needs handle-or-ID rows).
 
 **Goal**: every knob from `config.json` editable in the UI (PLAN.MD §10).
 
@@ -106,7 +117,11 @@ def chip_advice_v2(diff, chips, lineup, next_gw, cfg) -> list[dict]:
 
 ---
 
-## T4.6 — Optimizer weights UI (advanced)
+## T4.6 — Optimizer weights UI (advanced) — DONE (2026-09-20)
+
+> Status: complete. `WeightSlider.tsx` ships 3 sliders + live sum indicator (✓/must-be-1.00), Auto-normalize
+> (rounding-error absorbed by fixture so the sum is exactly 1.00), Reset to defaults, and per-weight "what this
+> does" tooltips. Server-side sum validation (`PUT /settings` ±0.01) plus client pre-save check.
 
 **Goal**: the §5 weights are visible/tunable without editing JSON (folded into T4.5 section 3 — this task adds the presentation + sanity UX).
 

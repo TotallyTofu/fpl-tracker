@@ -1,5 +1,6 @@
 // Typed API client. All /api/*; 422 → ApiError with parsed errors[].
 import type {
+  DbStats,
   Diff,
   Health,
   Lineup,
@@ -134,6 +135,8 @@ export const api = {
   getSettings: () => req<SettingsResponse>("/settings"),
   putSettings: (body: unknown) => req<SettingsResponse>("/settings", { method: "PUT", body: JSON.stringify(body) }),
   testLlm: () => req<{ ok: boolean; error?: string; model?: string; reply?: string }>("/settings/test-llm", { method: "POST" }),
+  clearSignals: () => req<{ cleared: number }>("/signals/clear", { method: "POST" }),
+  getDbStats: () => req<DbStats>("/meta/db-stats"),
 };
 
 export type { Diff };

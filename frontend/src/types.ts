@@ -183,12 +183,106 @@ export interface LLMConfig {
   batch_chars: number;
 }
 
+export interface YouTubeChannel {
+  handle: string;
+  channel_id: string;
+}
+
+export interface FplSource {
+  enabled: boolean;
+  bootstrap_interval_min: number;
+  live_players_interval_sec: number;
+  live_matches_interval_sec: number;
+}
+
+export interface EspnSource {
+  enabled: boolean;
+  news_interval_min: number;
+  live_interval_sec: number;
+}
+
+export interface BbcSource {
+  enabled: boolean;
+  interval_min: number;
+}
+
+export interface RedditSource {
+  enabled: boolean;
+  interval_min: number;
+  mode: string; // "rss" | "oauth"
+  oauth_client_id: string;
+  oauth_client_secret: string;
+}
+
+export interface YouTubeSource {
+  enabled: boolean;
+  interval_min: number;
+  channels: YouTubeChannel[];
+  transcript_keywords: string[];
+  max_transcripts_per_poll: number;
+  llm_truncate_chars: number;
+}
+
+export interface SourcesConfig {
+  fpl: FplSource;
+  espn: EspnSource;
+  bbc: BbcSource;
+  reddit: RedditSource;
+  youtube: YouTubeSource;
+}
+
+export interface OptimizerWeights {
+  ep: number;
+  form: number;
+  fixture: number;
+}
+
+export interface AvailabilityConfig {
+  active: boolean;
+  doubt: number;
+  chance_null: number;
+  chance_100: number;
+  chance_50: number;
+  chance_0: number;
+}
+
+export interface SignalConfig {
+  neg_per: number;
+  neg_cap: number;
+  pos_per: number;
+  pos_cap: number;
+}
+
+export interface SolverConfig {
+  restarts: number;
+  timebox_sec: number;
+  seed: number;
+  exact_ilp: boolean;
+}
+
+export interface OptimizerConfig {
+  weights: OptimizerWeights;
+  availability: AvailabilityConfig;
+  signal: SignalConfig;
+  differential_lambda: number;
+  differential_ep_floor: number;
+  solver: SolverConfig;
+}
+
+export interface GroupConfig {
+  fpl_entry_id: string;
+}
+
+export interface UIConfig {
+  theme: string;
+}
+
 export interface SettingsResponse {
-  sources: Record<string, unknown>;
+  sources: SourcesConfig;
   llm: LLMConfig;
-  optimizer: Record<string, unknown>;
-  group: Record<string, unknown>;
-  ui: Record<string, unknown>;
+  optimizer: OptimizerConfig;
+  group: GroupConfig;
+  ui: UIConfig;
   maps?: Record<string, unknown>;
   llm_status: {
     ready: boolean;
@@ -197,6 +291,19 @@ export interface SettingsResponse {
     key_set: boolean;
     note: string;
   };
+  pulp_available?: boolean;
+}
+
+export interface DbStats {
+  row_counts: Record<string, number>;
+  db_size_bytes: number;
+  recent_errors: {
+    source: string;
+    status: string;
+    rows: number | null;
+    error: string | null;
+    finished_at: string;
+  }[];
 }
 
 export interface Signal {

@@ -72,6 +72,14 @@ async def list_items(source: str | None = None, kind: str | None = None,
     return {"items": rows, "count": len(rows)}
 
 
+@router.post("/signals/clear")
+async def clear_signals() -> dict:
+    """Delete all extracted signals (Settings → Data). Items are kept."""
+    n = query_one("SELECT COUNT(*) AS n FROM signals")["n"]
+    execute("DELETE FROM signals")
+    return {"cleared": n}
+
+
 @router.post("/items/{item_id}/fetch-body")
 async def fetch_body(item_id: int) -> dict:
     """On-demand full-article fetch (BBC, D13). Updates body + re-queues extraction."""

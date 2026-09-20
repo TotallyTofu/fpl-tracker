@@ -48,6 +48,33 @@ async def get_health() -> dict:
     }
 
 
+@router.get("/meta/db-stats")
+async def get_db_stats() -> dict:
+    """DB stats for Settings → Data: row counts, file size, recent poll errors."""
+    from ..config import DB_PATH
+    from ..db import get_conn
+
+    tables = [
+        "players", "teams", "events", "fixtures", "lineups", "lineup_players",
+        "suggestions", "raw_items", "signals", "official_news_cache",
+        "chip_plays_log", "poll_log",
+    ]
+    conn = get_conn()
+    try:
+        counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in tables}
+        errors = conn.execute(
+            "SELECT source, status, rows, error, finished_at FROM poll_log "
+            "WHERE status = 'error' ORDER BY id DESC LIMIT 10"
+        ).fetchall()
+    finally:
+        conn.close()
+    return {
+        "row_counts": counts,
+        "db_size_bytes": DB_PATH.stat().st_size if DB_PATH.exists() else 0,
+        "recent_errors": [dict(e) for e in errors],
+    }
+
+
 @router.post("/refresh/{source}")
 async def refresh(source: str) -> dict:
     """On-demand refresh (PLAN.MD §8.4). Runs the fetcher immediately, then the
@@ -90,6 +117,12 @@ async def get_settings() -> dict:
         "key_set": bool(s.llm_api_key),
         "note": "LLM values come from .env when set, else config.json (Settings UI).",
     }
+    try:
+        import pulp  # noqa: F401
+
+        out["pulp_available"] = True
+    except ImportError:
+        out["pulp_available"] = False
     return out
 
 
