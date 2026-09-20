@@ -43,12 +43,19 @@ class SolvedLineup:
 
 
 def build_universe(target_gw: int, cfg) -> list[dict]:
-    """Eligible players: can_select=1, not u/s, not removed (hard gates)."""
-    rows = query(
+    """Eligible players: can_select=1, not u/s, not removed (hard gates).
+
+    M2 (T2.10): with optimizer.availability.active, chance_of_playing_next_round
+    = 0 is also excluded (the A(p) map would price them at 0 anyway).
+    """
+    sql = (
         """SELECT * FROM players
            WHERE can_select = 1 AND removed = 0
              AND (status IS NULL OR status NOT IN ('u', 's'))"""
     )
+    if cfg.optimizer.availability.active:
+        sql += " AND (chance_of_playing_next_round IS NULL OR chance_of_playing_next_round <> 0)"
+    rows = query(sql)
     return [dict(p) for p in rows]
 
 
@@ -418,6 +425,14 @@ def solve(params: SolveParams) -> SolvedLineup:
     notes = []
     top3 = sorted(xi_players, key=lambda p: p["ep"], reverse=True)[:3]
     notes.append("Top-EP starters: " + ", ".join(p.get("web_name", "?") for p in top3))
+    # M2 (T2.10): signal transparency — show which active signals moved the numbers
+    for p in xi_players:
+        for s in signals.get(p["id"], []):
+            delta = "+" if s["sentiment"] == "positive" else ("−" if s["sentiment"] == "negative" else "±")
+            notes.append(
+                f"Signal applied: {p.get('web_name', '?')} — "
+                f"\"{s['summary'][:90]}\" ({s['source'].split(':')[0]}, conf {s['confidence']:.2f}) → {delta}{abs(s['confidence']):.2f}"
+            )
     if params.profile == "differential":
         diff_players = [p for p in xi_players if p["own"] < 10]
         if diff_players:

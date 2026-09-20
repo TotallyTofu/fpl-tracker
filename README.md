@@ -61,21 +61,37 @@ has data immediately.
 3. **Dashboard** — season state (current/next GW, deadline countdown, live
    window), quick refresh of all sources, your current team strip, next-GW
    fixtures.
-4. **News** — M2: fetched articles/transcripts, extracted player signals
-   (sentiment + confidence), and which signals are currently applied.
+4. **News** — the signal pipeline:
+   - **Refresh sources** — per-source buttons (fpl / bbc / espn / reddit /
+      youtube / All + extract). Each fetch stores items, then the extraction
+      pipeline runs: LLM first (when configured), rule-based keywords as the
+      backstop. Results show rows fetched, filtered out, and signals stored.
+    - **Player signals** — the per-player output the optimizer consumes:
+      sentiment (green/red dot), category, confidence, summary, source ref,
+      expiry. Active signals directly shift projected points (`S(p)`).
+    - **Fetched items** — everything pulled (articles/threads/videos) with
+      extraction status and takeaways. BBC items have a **Fetch full article**
+      button (on-demand only — RSS title+description is the scheduled path).
 5. **Settings** — LLM endpoint config (base URL, **model name**, **API key**)
-   with a **Test connection** button; read-only view of `config.json` (M4 adds
-   the editor).
+    with **Save** and **Test connection**; read-only view of the rest of
+    `config.json` (M4 adds the full editor). With no LLM configured the app
+    still works — rule-based extraction (confidence ≤ 0.6) covers the basics.
+   
 
 ## Data sources
 
 | Source | What | How | Status |
 |---|---|---|---|
 | fantasy.premierleague.com | players, fixtures, game settings, bootstrap | official public API | ✅ M1 |
-| BBC Sport (football) | news articles | RSS | ✅ M2 |
-| Reddit r/FantasyPL | community threads | RSS (public feed) | ✅ M2 |
-| YouTube @PlanetFPL | "The Weekender" etc. | yt-dlp transcript download + LLM extraction | ✅ M2 |
-| ESPN | news | disabled (403 from this network) | ❌ intentionally off |
+| BBC Sport (football) | news articles | RSS (title+description; full article on demand) | ✅ M2 |
+| Reddit r/FantasyPL | community threads | RSS (public feed) + best-effort top comments | ✅ M2 |
+| YouTube @PlanetFPL | "The Weekender" etc. | channel RSS + yt-dlp auto-sub transcript (≤3/poll) | ✅ M2 |
+| ESPN | news | API (browser UA); **disabled by default** | ⚠️ opt-in |
+
+**Enabling ESPN:** it 403s a bare client from some networks, so it ships
+disabled. To turn it on, set `sources.espn.enabled = true` in `config.json`
+(Settings editor lands in M4) — the fetcher sends a browser User-Agent, which
+verified working.
 
 ### Reddit OAuth upgrade path (M2 uses RSS only)
 
@@ -89,6 +105,23 @@ access (higher rate limits, search, comments):
 3. The fetcher exchanges them for a bearer token and uses `oauth.reddit.com`.
 
 RSS mode is deliberately the default so the app works with zero credentials.
+
+> Thread bodies (top comments) are fetched best-effort for up to 5 headline
+> posts per poll. Reddit rate-limits aggressively on RSS: if a 429 is hit the
+> fetcher stops trying further threads for that poll (items are stored with
+> title+text only) and resumes on the next cycle.
+
+### LLM setup (optional but recommended)
+
+Extraction is LLM-first with a rule-based backstop. Point the app at any
+OpenAI-compatible `chat/completions` endpoint:
+
+1. **Settings** → enter **Base URL** (e.g. `http://localhost:8888/v1`),
+   **Model name**, and **API key** → **Save** → **Test connection**.
+2. The key is stored locally (`config.json`, or `.env` via `LLM_API_KEY` —
+   env wins) and only ever sent to that endpoint. Never logged.
+3. Until it's configured, the News page shows "LLM not configured —
+   rule-based extraction only (confidence ≤ 0.6)" and suggestions still work.
 
 ## FPL rules encoded (2026/27)
 
@@ -112,10 +145,14 @@ ep_final = w.ep · (EP_next · A(p) · (1 + S(p))) + w.form · form_adj + w.fixt
 ```
 
 - `w = {ep: 0.7, form: 0.15, fixture: 0.15}` (configurable).
-- `A(p)` availability multiplier — hard gates in M1 (unavailable excluded);
-  the doubt/chance map activates in M2 (`optimizer.availability.active`).
-- `S(p)` news signal adjustment — 0 in M1; M2: negative signals −0.5 each
-  (conf-weighted, floor −0.6), positive +0.1 (cap +0.2).
+- `A(p)` availability multiplier — hard gates always (unavailable excluded);
+  the doubt/chance map is **active** (`optimizer.availability.active=true`):
+  doubt ×0.7, chance-null ×1.0, 100 ×1.0, 50 ×0.65, 0 → excluded from the
+  universe.
+- `S(p)` news signal adjustment — negative signals −0.5 each (conf-weighted,
+  floor −0.6), positive +0.1 (cap +0.2). Rule-based signals cap at 0.6
+  confidence; LLM signals follow source-reliability bands (official 0.9–1.0,
+  reputable 0.6–0.8, rumor 0.3–0.5, vague 0.2).
 - `form_adj` / `fixture_adj` — per-position form and next-GW fixture difficulty.
 
 ## Architecture
@@ -126,14 +163,17 @@ backend/
     config.py         config.json + .env loader
     db.py             SQLite (WAL), per-call connections, schema
     httpclient.py     shared httpx.AsyncClient
-    scheduler.py      APScheduler (M1 stub → M3 job table)
+    scheduler.py      APScheduler (fpl 15m · bbc/espn/reddit 30m · youtube 60m · extract 10m)
     season.py         season state, chip windows, next-GW fixtures
-    fetchers/         fpl.py (M1) · bbc.py reddit.py youtube.py (M2)
-    signals/          names.py (name matcher) · extract.py (M2 LLM)
+    fetchers/         fpl.py · bbc.py · espn.py · reddit.py · youtube.py
+    signals/          ingest.py (dedupe store) · names.py (matcher) ·
+                      rule_extractor.py (keyword backstop) · llm_extractor.py ·
+                      store.py (TTL) · pipeline.py (LLM→rules orchestration)
     optimizer/        rules.py · scoring.py · solver.py · transfers.py
-    api/              meta · players · lineups · suggestions · settings
+    api/              meta · players · lineups · suggestions · settings · news
   scripts/dev_check.py
-  tests/              56 tests (rules, EP model, transfers, solver, names, API)
+  tests/              116 tests (rules, EP, transfers, solver, names, API,
+                      signals rule/llm/ingest, fetchers, news API)
 frontend/
   src/
     pages/            Dashboard · MyTeam · Suggestions · News · Settings
@@ -148,7 +188,7 @@ data/                 fpl.db (gitignored)
 
 ```powershell
 cd backend
-..\.venv\Scripts\python -m pytest tests -q     # 56 tests, no network needed
+..\.venv\Scripts\python -m pytest tests -q     # 116 tests, no network needed
 ..\.venv\Scripts\python scripts\dev_check.py   # live end-to-end smoke check
 ```
 
@@ -161,9 +201,15 @@ suggestions, SQLite for zero-ops local storage.
 
 ## Notes & caveats
 
-- M1 has **no news, no LLM, no live polling** — the hooks exist but are inert
-  (`availability.active=false`, no signals). That's why `safe` ≡ `max_ep`
-  in M1 (shown as a variant, not "fixed").
+- M2 turns on the signal pipeline and the availability map
+  (`optimizer.availability.active=true`). Rule-based extraction works with no
+  LLM; configure one in Settings for higher-confidence, LLM-extracted signals.
+  When a signal hits a player in the suggested XI, the rationale notes it
+  ("Signal applied: …"). `safe` can now diverge from `max_ep` (doubt/50%
+  players and negative signals are priced differently).
+- LLM transcripts are **auto-captions only** (yt-dlp `--write-auto-sub`),
+  budgeted to 3 videos per poll, and only used by the LLM path — the rule
+  path reads YouTube title+description only (caption noise would confuse it).
 - Suggestions are **projections, not guarantees** — the model weights are
   configurable defaults, not a claim of optimality.
 - The app stores no credentials except what you type into Settings (LLM key,

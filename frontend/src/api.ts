@@ -6,8 +6,10 @@ import type {
   LineupSummary,
   NameMatch,
   Player,
+  RawItem,
   Season,
   SettingsResponse,
+  Signal,
   Suggestion,
 } from "./types";
 
@@ -48,7 +50,25 @@ export const api = {
   getSeason: () => req<Season>("/meta/season"),
   getHealth: () => req<Health>("/meta/health"),
   refresh: (source: string) =>
-    req<{ results: Record<string, string> }>(`/refresh/${source}`, { method: "POST" }),
+    req<{ results: Record<string, string | { status: string; rows?: number; [k: string]: unknown }> }>(
+      `/refresh/${source}`,
+      { method: "POST" }
+    ),
+
+  getSignals: (params: { player_id?: number; team?: string; category?: string; active?: boolean } = {}) => {
+    const q = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== "") q.set(k, String(v));
+    const qs = q.toString();
+    return req<{ signals: Signal[]; count: number }>(`/signals${qs ? `?${qs}` : ""}`);
+  },
+  getItems: (params: { source?: string; kind?: string; limit?: number; offset?: number } = {}) => {
+    const q = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== "") q.set(k, String(v));
+    const qs = q.toString();
+    return req<{ items: RawItem[]; count: number }>(`/items${qs ? `?${qs}` : ""}`);
+  },
+  fetchItemBody: (id: number) =>
+    req<{ body: string; truncated: boolean }>(`/items/${id}/fetch-body`, { method: "POST" }),
 
   getPlayers: (params: {
     search?: string;

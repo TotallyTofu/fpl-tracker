@@ -17,3 +17,4 @@ frontend/dist/
 tmp-video-test/
 probe_sources.py
 .npm-cache/
+.playwright-mcp/

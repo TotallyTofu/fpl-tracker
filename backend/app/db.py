@@ -210,40 +210,45 @@ CREATE TABLE IF NOT EXISTS suggestions (
 
 CREATE TABLE IF NOT EXISTS raw_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  source TEXT NOT NULL,                        -- bbc | espn | reddit | youtube | fpl_official
+  source TEXT NOT NULL,                        -- fpl-official | bbc | espn | reddit | youtube
   external_id TEXT NOT NULL,
-  kind TEXT NOT NULL,                          -- article | thread | video | transcript
-  title TEXT NOT NULL,
+  kind TEXT NOT NULL,                          -- article | thread | video | official-news
+  title TEXT,
   url TEXT,
   published_at TEXT,
   body TEXT,
-  takeaways TEXT,                              -- JSON list
-  content_hash TEXT NOT NULL,
+  content_hash TEXT NOT NULL,                  -- sha256(source|title|body[:2000])
+  takeaways TEXT,                              -- JSON list of one-line takeaways
+  processed INTEGER NOT NULL DEFAULT 0,        -- 1 = signal extraction completed
   retrieved_at TEXT NOT NULL,
-  processed INTEGER NOT NULL DEFAULT 0,
   UNIQUE(source, content_hash)
 );
+CREATE INDEX IF NOT EXISTS idx_items_source ON raw_items(source, retrieved_at);
 CREATE INDEX IF NOT EXISTS idx_raw_items_pending ON raw_items(processed, retrieved_at);
 
 CREATE TABLE IF NOT EXISTS signals (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  player_id INTEGER NOT NULL REFERENCES players(id),
-  category TEXT NOT NULL,                      -- injury | doubt | suspension | selection | return | transfer | fixture | form | other
-  sentiment TEXT NOT NULL,                     -- positive | negative | neutral
-  confidence REAL NOT NULL,                    -- 0..1
-  source_item_id INTEGER REFERENCES raw_items(id),
-  excerpt TEXT,
-  model TEXT NOT NULL,                         -- llm:{model} | rules
-  created_at TEXT NOT NULL,
-  expires_at TEXT
+  player_id INTEGER NOT NULL,
+  category TEXT NOT NULL,                      -- injury | suspension | selection | rotation | return | transfer | other
+  sentiment TEXT NOT NULL,                     -- negative | positive | neutral
+  confidence REAL NOT NULL,                    -- 0.0-1.0
+  summary TEXT NOT NULL,                       -- one-line takeaway
+  source TEXT NOT NULL,                        -- fpl-official | bbc:<url> | espn:<id> | reddit:<thread_id> | youtube:<video_id>
+  url TEXT,
+  published_at TEXT,
+  retrieved_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,                    -- TTL (default 72 h; official = until replaced)
+  raw_item_id INTEGER,
+  model TEXT NOT NULL DEFAULT 'rules'          -- 'rules' | 'llm:{model}' (provenance)
 );
-CREATE INDEX IF NOT EXISTS idx_signals_player ON signals(player_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_signals_player ON signals(player_id, expires_at);
 
 CREATE TABLE IF NOT EXISTS official_news_cache (
   player_id INTEGER PRIMARY KEY REFERENCES players(id),
-  news TEXT,
   status TEXT,
-  checked_at TEXT NOT NULL
+  news TEXT,
+  chance INTEGER,
+  updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS live_matches (
@@ -393,6 +398,13 @@ def now_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    except sqlite3.Error:
+        return set()
+
+
 def init_db(path: str | Path | None = None) -> None:
     p = Path(path) if path else DB_PATH
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -400,6 +412,15 @@ def init_db(path: str | Path | None = None) -> None:
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        # M2 migration: signals / official_news_cache were pre-shaped in M1 with a
+        # different column set. Both are empty before M2 (no writer existed), so a
+        # drop-and-recreate to the PLAN.MD §7 shape is safe.
+        sig = _table_columns(conn, "signals")
+        if sig and not {"summary", "retrieved_at", "expires_at"} <= sig:
+            conn.execute("DROP TABLE signals")
+        cache = _table_columns(conn, "official_news_cache")
+        if cache and not {"chance", "updated_at"} <= cache:
+            conn.execute("DROP TABLE official_news_cache")
         conn.executescript(SCHEMA)
         conn.commit()
     finally:

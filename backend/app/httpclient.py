@@ -34,13 +34,14 @@ class HttpClient:
         return self._client
 
     async def get_json(self, url: str, *, params: dict | None = None,
-                       timeout: float | None = None) -> Any:
-        return await self._get(url, params=params, parse=json.loads, timeout=timeout)
+                       timeout: float | None = None, headers: dict | None = None) -> Any:
+        return await self._get(url, params=params, parse=json.loads, timeout=timeout,
+                               headers=headers)
 
     async def get_text(self, url: str, *, params: dict | None = None,
-                       timeout: float | None = None) -> str:
+                       timeout: float | None = None, headers: dict | None = None) -> str:
         return await self._get(url, params=params, parse=lambda b: b.decode("utf-8", "ignore"),
-                               timeout=timeout)
+                               timeout=timeout, headers=headers)
 
     async def post_json(self, url: str, *, payload: dict | None = None,
                         headers: dict | None = None, timeout: float | None = None) -> Any:
@@ -62,13 +63,15 @@ class HttpClient:
         raise last_exc  # type: ignore[misc]
 
     async def _get(self, url: str, *, params: dict | None,
-                   parse: Callable[[bytes], Any], timeout: float | None) -> Any:
+                   parse: Callable[[bytes], Any], timeout: float | None,
+                   headers: dict | None = None) -> Any:
         c = await self.client()
         last_exc: Exception | None = None
         for attempt in range(RETRIES + 1):
             try:
                 async with self._sem:
-                    r = await c.get(url, params=params, timeout=timeout or TIMEOUT)
+                    r = await c.get(url, params=params, timeout=timeout or TIMEOUT,
+                                    headers=headers)
                 if r.status_code >= 500:
                     raise httpx.HTTPStatusError(f"5xx {r.status_code}", request=r.request,
                                                 response=r)

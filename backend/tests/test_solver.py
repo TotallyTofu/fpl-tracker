@@ -78,3 +78,40 @@ def test_solver_fails_on_empty_universe(db_path, cfg):
     with pytest.raises(ValueError):
         solve(SolveParams(current_squad=[], bank=5, chips={}, target_gw=6,
                           profile="max_ep", cfg=cfg))
+
+
+def test_universe_excludes_chance_zero_when_active(db_path, cfg):
+    """T2.10: chance_of_playing_next_round = 0 is excluded only when
+    optimizer.availability.active is True."""
+    from app.db import execute
+    from app.optimizer.solver import build_universe
+
+    execute("UPDATE players SET chance_of_playing_next_round = 0 WHERE id = 23")
+    ids_inactive = {p["id"] for p in build_universe(6, cfg)}  # cfg fixture: active=False
+    assert 23 in ids_inactive
+
+    cfg.optimizer.availability.active = True
+    ids_active = {p["id"] for p in build_universe(6, cfg)}
+    assert 23 not in ids_active
+
+
+def test_signal_applied_note_in_rationale(db_path, cfg):
+    """T2.10: active signals on an XI player produce a 'Signal applied' note.
+
+    Player 1 (top-EP GK) is always in the XI, so the note is guaranteed.
+    """
+    from app.signals import store
+
+    # conf 0.2: drops EP 5.87 vs the other GK's 5.65 → player 1 stays in the XI
+    sig = {
+        "player_id": 1, "category": "injury", "sentiment": "negative",
+        "confidence": 0.2, "summary": "Goal One hamstring knock, to be assessed.",
+        "source": "bbc:x1", "url": "http://x", "published_at": "2026-09-19T12:00:00Z",
+        "raw_item_id": None, "model": "rules",
+    }
+    store.save_signals([dict(sig)])
+    s = solve(SolveParams(current_squad=[], bank=5, chips={}, target_gw=6,
+                          profile="max_ep", cfg=cfg,
+                          signals_by_player={1: [dict(sig)]}))
+    assert 1 in s.xi
+    assert any(n.startswith("Signal applied: Goal One") for n in s.notes)

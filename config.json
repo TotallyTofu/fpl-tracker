@@ -57,7 +57,7 @@
       "fixture": 0.15
     },
     "availability": {
-      "active": false,
+      "active": true,
       "doubt": 0.7,
       "chance_null": 1.0,
       "chance_100": 1.0,

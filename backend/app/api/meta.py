@@ -41,20 +41,53 @@ async def get_health() -> dict:
 
 @router.post("/refresh/{source}")
 async def refresh(source: str) -> dict:
-    """On-demand refresh. M1: fpl only. News sources arrive in M2, live in M3."""
+    """On-demand refresh (PLAN.MD §8.4). Runs the fetcher immediately, then the
+    signal pipeline over any newly ingested items."""
     if source not in ("fpl", "espn", "bbc", "reddit", "youtube", "all"):
         raise HTTPException(404, f"unknown source '{source}'")
     targets = ["fpl", "espn", "bbc", "reddit", "youtube"] if source == "all" else [source]
-    results: dict[str, str] = {}
+    cfg = load_settings().config
+    results: dict[str, dict | str] = {}
     for t in targets:
-        if t == "fpl":
-            try:
+        try:
+            if t == "fpl":
                 await fpl_fetcher.refresh_all_fpl()
                 results[t] = "ok"
-            except Exception as e:
-                results[t] = f"error: {e}"
-        else:
-            results[t] = "not available yet (M2/M3)"
+            elif t == "bbc":
+                from ..fetchers.bbc import refresh_bbc
+
+                results[t] = await refresh_bbc()
+            elif t == "espn":
+                if not cfg.sources.espn.enabled:
+                    results[t] = "skipped (espn disabled in settings)"
+                    continue
+                from ..fetchers.espn import refresh_espn
+
+                results[t] = await refresh_espn()
+            elif t == "reddit":
+                from ..fetchers.reddit import refresh_reddit
+
+                results[t] = await refresh_reddit(cfg)
+            elif t == "youtube":
+                from ..fetchers.youtube import refresh_youtube
+
+                before = {c.channel_id for c in cfg.sources.youtube.channels}
+                results[t] = await refresh_youtube(cfg)
+                after = {c.channel_id for c in cfg.sources.youtube.channels}
+                if after - before:  # handle→channel_id resolved this poll
+                    save_config(cfg)
+        except Exception as e:
+            log.exception("refresh %s failed", t)
+            results[t] = f"error: {e}"
+    # signal pipeline over newly ingested items (non-fatal)
+    try:
+        from ..signals.pipeline import process_pending_items
+
+        n = await process_pending_items(limit=50)
+        if n:
+            results["signals_stored"] = n
+    except Exception:
+        log.exception("signal pipeline failed (non-fatal)")
     return {"results": results}
 
 

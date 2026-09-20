@@ -192,9 +192,23 @@ async def fetch_fixtures(with_difficulty: bool = True) -> int:
 
 
 async def refresh_all_fpl() -> None:
-    """Full FPL refresh: bootstrap + fixtures (+difficulty)."""
+    """Full FPL refresh: bootstrap + fixtures (+difficulty) + official-news signals."""
     await fetch_bootstrap()
     await fetch_fixtures()
+    # M2 T2.7b: official FPL status/news changes → conf 1.0 signals (non-fatal).
+    try:
+        from ..signals.pipeline import process_official_news
+
+        players = query(
+            """SELECT id, web_name, status, news, news_added,
+                      chance_of_playing_next_round
+               FROM players WHERE removed = 0"""
+        )
+        n = process_official_news(players)
+        if n:
+            log.info("official news: %d signals", n)
+    except Exception:
+        log.exception("official news processing failed (non-fatal)")
 
 
 # --- live (M3) -------------------------------------------------------------------

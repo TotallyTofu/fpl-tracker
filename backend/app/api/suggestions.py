@@ -19,7 +19,7 @@ router = APIRouter()
 def _current_signals() -> dict[int, list[dict]]:
     """Active (non-expired) signals grouped by player. M1: empty; M2: live."""
     rows = query(
-        "SELECT * FROM signals WHERE (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC",
+        "SELECT * FROM signals WHERE (expires_at IS NULL OR expires_at > ?) ORDER BY retrieved_at DESC",
         (now_utc(),),
     )
     out: dict[int, list[dict]] = {}

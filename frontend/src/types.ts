@@ -171,12 +171,22 @@ export interface NameMatch {
   candidates: MatchedPlayer[];
 }
 
+export interface LLMConfig {
+  enabled: boolean;
+  base_url: string;
+  api_key: string;
+  model: string;
+  timeout_sec: number;
+  batch_chars: number;
+}
+
 export interface SettingsResponse {
   sources: Record<string, unknown>;
-  llm: Record<string, unknown>;
+  llm: LLMConfig;
   optimizer: Record<string, unknown>;
   group: Record<string, unknown>;
   ui: Record<string, unknown>;
+  maps?: Record<string, unknown>;
   llm_status: {
     ready: boolean;
     base_url: string;
@@ -184,6 +194,37 @@ export interface SettingsResponse {
     key_set: boolean;
     note: string;
   };
+}
+
+export interface Signal {
+  id: number;
+  player_id: number;
+  web_name: string | null;
+  team_code: string | null;
+  category: "injury" | "suspension" | "selection" | "return" | "transfer" | "other";
+  sentiment: "positive" | "negative";
+  confidence: number;
+  summary: string;
+  source: string;
+  url: string | null;
+  published_at: string | null;
+  retrieved_at: string;
+  expires_at: string;
+  model: string;
+}
+
+export interface RawItem {
+  id: number;
+  source: string;
+  external_id: string | null;
+  kind: "article" | "thread" | "video" | "official-news";
+  title: string | null;
+  url: string | null;
+  published_at: string | null;
+  retrieved_at: string;
+  body: string | null;
+  takeaways: string[];
+  processed: boolean;
 }
 
 export interface PollInfo {

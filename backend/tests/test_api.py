@@ -138,7 +138,6 @@ def test_settings_get(client):
     assert "weights" in d["optimizer"] or "llm" in d
 
 
-def test_refresh_not_available_sources(client):
-    r = client.post("/api/refresh/bbc")
-    assert r.status_code == 200
-    assert "M2" in str(r.json()) or "not available" in str(r.json())
+def test_refresh_unknown_source_404(client):
+    r = client.post("/api/refresh/nope")
+    assert r.status_code == 404
