@@ -1,0 +1,1 @@
+# Signal pipeline: name matching (M1), ingestion + extractors (M2).

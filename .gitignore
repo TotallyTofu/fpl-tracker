@@ -1,0 +1,19 @@
+# secrets & local data
+.env
+data/
+!data/.gitkeep
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# node
+node_modules/
+frontend/dist/
+
+# local artifacts
+tmp-video-test/
+probe_sources.py
+.npm-cache/

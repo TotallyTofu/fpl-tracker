@@ -1,0 +1,96 @@
+// Typed API client. All /api/*; 422 → ApiError with parsed errors[].
+import type {
+  Diff,
+  Health,
+  Lineup,
+  LineupSummary,
+  NameMatch,
+  Player,
+  Season,
+  SettingsResponse,
+  Suggestion,
+} from "./types";
+
+export class ApiError extends Error {
+  status: number;
+  errors: { code: string; message: string; severity: string }[];
+  constructor(status: number, message: string, errors: ApiError["errors"] = []) {
+    super(message);
+    this.status = status;
+    this.errors = errors;
+  }
+}
+
+async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  const r = await fetch(`/api${path}`, {
+    headers: { "Content-Type": "application/json" },
+    ...init,
+  });
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`;
+    let errors: ApiError["errors"] = [];
+    try {
+      const body = await r.json();
+      if (typeof body.detail === "string") msg = body.detail;
+      else if (Array.isArray(body.detail)) {
+        errors = body.detail;
+        msg = errors.map((e) => e.message || e.code).join("; ");
+      } else if (body.error) msg = body.error;
+    } catch {
+      /* non-JSON */
+    }
+    throw new ApiError(r.status, msg, errors);
+  }
+  return r.json() as Promise<T>;
+}
+
+export const api = {
+  getSeason: () => req<Season>("/meta/season"),
+  getHealth: () => req<Health>("/meta/health"),
+  refresh: (source: string) =>
+    req<{ results: Record<string, string> }>(`/refresh/${source}`, { method: "POST" }),
+
+  getPlayers: (params: {
+    search?: string;
+    pos?: number;
+    team?: number;
+    min_cost?: number;
+    max_cost?: number;
+    has_signal?: boolean;
+    limit?: number;
+  }) => {
+    const q = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== "") q.set(k, String(v));
+    return req<{ players: Player[]; count: number }>(`/players?${q.toString()}`);
+  },
+
+  listLineups: () => req<{ lineups: LineupSummary[] }>("/lineups"),
+  getLineup: (id: number) => req<Lineup>(`/lineups/${id}`),
+  createLineup: (body: unknown) => req<Lineup>("/lineups", { method: "POST", body: JSON.stringify(body) }),
+  updateLineup: (id: number, body: unknown) =>
+    req<Lineup>(`/lineups/${id}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteLineup: (id: number) => req<{ deleted: number }>(`/lineups/${id}`, { method: "DELETE" }),
+  setCurrent: (id: number) => req<{ current: number }>(`/lineups/${id}/set-current`, { method: "POST" }),
+  matchNames: (names: string[]) =>
+    req<{ matches: NameMatch[] }>("/lineups/match-names", {
+      method: "POST",
+      body: JSON.stringify({ names }),
+    }),
+
+  generateSuggestions: (body: { lineup_id: number; target_gw?: number }) =>
+    req<{ suggestions: Suggestion[]; target_gw: number }>("/suggestions/generate", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  listSuggestions: (lineupId?: number) =>
+    req<{ suggestions: Suggestion[] }>(
+      `/suggestions${lineupId ? `?lineup_id=${lineupId}` : ""}`
+    ),
+  deleteSuggestion: (id: number) => req<{ deleted: number }>(`/suggestions/${id}`, { method: "DELETE" }),
+
+  getSettings: () => req<SettingsResponse>("/settings"),
+  putSettings: (body: unknown) => req<SettingsResponse>("/settings", { method: "PUT", body: JSON.stringify(body) }),
+  testLlm: () => req<{ ok: boolean; error?: string; model?: string; reply?: string }>("/settings/test-llm", { method: "POST" }),
+};
+
+export type { Diff };

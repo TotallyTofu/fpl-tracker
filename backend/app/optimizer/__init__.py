@@ -1,0 +1,1 @@
+# Optimizer: rules validator, EP model, solver, transfer math (PLAN.MD §5–§8).

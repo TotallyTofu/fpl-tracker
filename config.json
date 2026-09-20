@@ -1,0 +1,89 @@
+{
+  "sources": {
+    "fpl": {
+      "enabled": true,
+      "bootstrap_interval_min": 15,
+      "live_players_interval_sec": 60,
+      "live_matches_interval_sec": 30
+    },
+    "espn": {
+      "enabled": false,
+      "news_interval_min": 30,
+      "live_interval_sec": 30
+    },
+    "bbc": {
+      "enabled": true,
+      "interval_min": 30
+    },
+    "reddit": {
+      "enabled": true,
+      "interval_min": 30,
+      "mode": "rss",
+      "oauth_client_id": "",
+      "oauth_client_secret": ""
+    },
+    "youtube": {
+      "enabled": true,
+      "interval_min": 60,
+      "channels": [
+        {
+          "handle": "@PlanetFPL",
+          "channel_id": "UC8043oOKTB4uP8Nq15Kz6bg"
+        }
+      ],
+      "transcript_keywords": [
+        "weekender",
+        "deadline stream",
+        "cotc",
+        "clash of the correspondents",
+        "review"
+      ],
+      "max_transcripts_per_poll": 3,
+      "llm_truncate_chars": 12000
+    }
+  },
+  "llm": {
+    "enabled": true,
+    "base_url": "http://localhost:8888/v1",
+    "api_key": "",
+    "model": "",
+    "timeout_sec": 60,
+    "batch_chars": 8000
+  },
+  "optimizer": {
+    "weights": {
+      "ep": 0.7,
+      "form": 0.15,
+      "fixture": 0.15
+    },
+    "availability": {
+      "active": false,
+      "doubt": 0.7,
+      "chance_null": 1.0,
+      "chance_100": 1.0,
+      "chance_50": 0.65,
+      "chance_0": 0.0
+    },
+    "signal": {
+      "neg_per": -0.5,
+      "neg_cap": -0.6,
+      "pos_per": 0.1,
+      "pos_cap": 0.2
+    },
+    "differential_lambda": 3.0,
+    "differential_ep_floor": 0.4,
+    "solver": {
+      "restarts": 20,
+      "timebox_sec": 8,
+      "seed": 42,
+      "exact_ilp": false
+    }
+  },
+  "group": {
+    "fpl_entry_id": ""
+  },
+  "ui": {
+    "theme": "dark"
+  },
+  "maps": {}
+}
