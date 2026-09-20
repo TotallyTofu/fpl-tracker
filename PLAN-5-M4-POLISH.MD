@@ -133,7 +133,24 @@ AC7 is therefore out of scope for T4.9. Implementation below is kept for a futur
 
 ---
 
-## T4.7 — Packaging (production mode final)
+## T4.7 — Packaging (production mode final) — DONE (2026-09-20)
+
+> Status: complete. `start.ps1`/`start.sh` finalized: mode auto-detect (prod if
+> `frontend/dist` exists, else dev — printed notice), `-Prod`/`-Dev`/`-Port`/`-Rebuild`
+> (`--prod`/`--dev`/`--port`/`--rebuild`), Python detection chain (`py -3.11` → `py -3` →
+> `python` → `python3`), pip install gated on a SHA-256 marker of `requirements.txt`
+> (`.venv/.reqs.sha256`), npm install gated on `node_modules` presence with a
+> project-local-cache retry for restricted environments, `npm run build` when dist
+> missing or `-Rebuild`, winget hints for missing Python/Node, console kept open on
+> crash (Read-Host). Dev-mode `--port` works via `FPL_API_TARGET` picked up by
+> `vite.config.ts` proxy. `main.py` static mount was already spec-compliant (SPA
+> fallback; unknown `/api/*` → JSON 404, verified live). README quick-start +
+> Settings section updated. Fresh-clone simulation PASSED: wiped `.venv`,
+> `node_modules`, `dist`, `data/fpl.db` → `start.ps1 -Prod` → venv+pip+npm+build all
+> ran, server on :8000 with live FPL data (667 players) + startup news refresh
+> (bbc/reddit/youtube ok) + working SPA deep-links; user data restored from backup
+> afterwards. Both launchers are ASCII-only (Windows PowerShell 5.1 mis-parses
+> UTF-8-no-BOM scripts with non-ASCII chars — first draft hit this).
 
 **Goal**: AC1 — one command, one port, robust restarts.
 

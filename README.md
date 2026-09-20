@@ -11,23 +11,34 @@ Frontend: React 18 + Vite + TypeScript.
 
 ## Quick start
 
-Prereqs: Python 3.11+, Node 18+.
+Prereqs: Python 3.11+, Node 18+ (Node is only needed for dev mode or the first
+build — a fresh prod start with an existing `frontend/dist` runs on Python alone).
 
 ```powershell
 # Windows
-.\start.ps1            # dev: API :8000 + UI http://localhost:5173
-.\start.ps1 -Prod      # prod: everything on http://127.0.0.1:8000
+.\start.ps1                    # auto: prod if frontend\dist exists, else dev
+.\start.ps1 -Prod              # prod: everything on http://127.0.0.1:8000
+.\start.ps1 -Dev               # dev: API :8000 + UI http://localhost:5173 (HMR)
+.\start.ps1 -Prod -Port 9000   # port override
+.\start.ps1 -Prod -Rebuild     # force `npm run build` even if dist exists
 ```
 
 ```bash
 # Linux / macOS / WSL
-./start.sh             # dev
-./start.sh --prod      # prod
+./start.sh                     # auto
+./start.sh --prod              # prod
+./start.sh --dev               # dev
+./start.sh --prod --port 9000  # port override
+./start.sh --prod --rebuild    # force rebuild
 ```
 
-The launcher is idempotent: it creates `.venv`, installs `backend/requirements.txt`
-(`pip --no-cache-dir`), runs `npm install` in `frontend/`, and runs `vite build`
-— each only if missing. On every start the app first fetches the full FPL
+The launcher is idempotent: it detects your Python (`py -3.11` → `py -3` →
+`python` → `python3`), creates `.venv`, installs `backend/requirements.txt`
+(`pip --no-cache-dir`) only when the requirements file changed, runs
+`npm install` in `frontend/` and `npm run build` only if missing (or with
+`-Rebuild`/`--rebuild`). Missing Node on Windows gets a
+`winget install OpenJS.NodeJS.LTS` hint, and the console stays open if the
+server crashes so you can read the error. On every start the app first fetches the full FPL
 dataset (bootstrap: elements, fixtures, game settings, bootstrap-transfers) so
 the UI has data immediately, then runs a **full news refresh in the background**
 (BBC + Reddit + YouTube + signal extraction; ESPN when enabled). A banner in
@@ -78,10 +89,23 @@ YouTube 60 min, extraction 10 min) and the manual refresh buttons.
     - **Fetched items** — everything pulled (articles/threads/videos) with
       extraction status and takeaways. BBC items have a **Fetch full article**
       button (on-demand only — RSS title+description is the scheduled path).
-5. **Settings** — LLM endpoint config (base URL, **model name**, **API key**)
-    with **Save** and **Test connection**; read-only view of the rest of
-    `config.json` (M4 adds the full editor). With no LLM configured the app
-    still works — rule-based extraction (confidence ≤ 0.6) covers the basics.
+5. **Settings** — every knob from `config.json`, organised in six sections:
+    - **LLM** — enabled, base URL, model, API key (password input, stored
+      locally only), timeout, batch size, live **Test connection**.
+    - **Sources** — per-source enabled toggle + refresh interval (FPL, ESPN,
+      BBC, Reddit with rss/oauth mode, YouTube with the channel list +
+      transcript keywords).
+    - **Optimizer** — EP/Form/Fixture weight sliders (sum must be 1.00,
+      auto-normalise + reset), availability map, signal coefficients,
+      differential λ + EP floor, solver (restarts, timebox, seed, exact-ILP —
+      greyed out until PuLP is installed).
+    - **Group** — FPL entry ID (optional; the group-rank card is not in v1).
+    - **Data** — "Re-fetch all now", "Clear all signals", live DB stats
+      (row counts, file size, recent poll errors).
+    - **About** — version, sources + ToS posture, disclaimer.
+    Save validates client-side (weights sum) and server-side, then writes
+    `config.json` on disk. With no LLM configured the app still works —
+    rule-based extraction (confidence ≤ 0.6) covers the basics.
    
 
 ## Data sources
@@ -179,8 +203,9 @@ backend/
     optimizer/        rules.py · scoring.py · solver.py · transfers.py
     api/              meta · players · lineups · suggestions · settings · news
   scripts/dev_check.py
-  tests/              125 tests (rules, EP, transfers, solver, names, API,
-                      signals rule/llm/ingest, fetchers, news API, startup)
+  tests/              139 tests (rules, EP, transfers, solver, names, API,
+                      signals rule/llm/ingest, fetchers, news API, startup,
+                      chip advice, chip-play endpoints)
 frontend/
   src/
     pages/            Dashboard · MyTeam · Suggestions · News · Settings
@@ -195,7 +220,7 @@ data/                 fpl.db (gitignored)
 
 ```powershell
 cd backend
-..\.venv\Scripts\python -m pytest tests -q     # 125 tests, no network needed
+..\.venv\Scripts\python -m pytest tests -q     # 139 tests, no network needed
 ..\.venv\Scripts\python scripts\dev_check.py   # live end-to-end smoke check
 ```
 

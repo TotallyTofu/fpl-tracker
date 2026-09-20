@@ -6,7 +6,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": "http://localhost:8000",
+      // start.ps1/start.sh set FPL_API_TARGET when running with a custom --port.
+      "/api": process.env.FPL_API_TARGET || "http://localhost:8000",
     },
   },
 });
