@@ -13,7 +13,9 @@
     },
     "bbc": {
       "enabled": true,
-      "interval_min": 30
+      "interval_min": 30,
+      "fetch_bodies": true,
+      "max_bodies_per_poll": 10
     },
     "reddit": {
       "enabled": true,
@@ -48,7 +50,9 @@
     "api_key": "",
     "model": "",
     "timeout_sec": 60,
-    "batch_chars": 8000
+    "batch_chars": 8000,
+    "max_tokens": 16000,
+    "player_list_mode": "filtered"
   },
   "optimizer": {
     "weights": {
@@ -57,7 +61,7 @@
       "fixture": 0.15
     },
     "availability": {
-      "active": true,
+      "active": false,
       "doubt": 0.7,
       "chance_null": 1.0,
       "chance_100": 1.0,

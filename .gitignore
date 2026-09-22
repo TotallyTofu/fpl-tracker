@@ -1,5 +1,6 @@
 # secrets & local data
 .env
+config.json
 data/
 !data/.gitkeep
 
