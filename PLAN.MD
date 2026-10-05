@@ -63,7 +63,7 @@ Build a **local web app** (FastAPI + React + SQLite, user's PC only) that:
 | D10 | Planet FPL default channel: handle `@PlanetFPL`, channel ID **`UC8043oOKTB4uP8Nq15Kz6bg`** (V7). User can add channels in Settings (handle or ID; handles resolved via yt-dlp on first fetch). |
 | D11 | Transcript fetching: **yt-dlp subprocess is primary** (V8: installed & verified on user's machine). `youtube-transcript-api` is the documented alternative behind the same adapter interface. |
 | D12 | LLM client: plain `httpx` POST to `{base_url}/chat/completions`. **No `openai` SDK dependency.** |
-| D13 | BBC v1: RSS title+description only (sufficient for signals). Full-article fetch = on-demand UI button, never scheduled. |
+| D13 | BBC v1: RSS title+description only (sufficient for signals). Full-article fetch = on-demand UI button, never scheduled. **Superseded (2026-09-21, FIX.MD Task 3): new PL-relevant items auto-fetch full article text (`sources.bbc.fetch_bodies`, capped by `max_bodies_per_poll`); the on-demand button remains as fallback.** |
 | D14 | Ports: backend `8000`, Vite dev `5173`. Two run modes: **dev** (two processes) and **production** (`npm run build` → FastAPI serves `frontend/dist`; single process). |
 | D15 | Launchers: `start.ps1` (primary — user is on Windows) + `start.sh`. |
 | D16 | Tests: backend pytest with golden fixtures (required); frontend v1 has **no** test framework (manual E2E checklist in README). |
@@ -112,8 +112,8 @@ Build a **local web app** (FastAPI + React + SQLite, user's PC only) that:
 |---|---|---|---|---|
 | **FPL** | `GET https://fantasy.premierleague.com/api/bootstrap-static/` · `GET /api/element-summary/{player_id}/` · `GET /api/event/{gw}/` · `GET /api/game-settings/` · `GET /api/entry/{entry_id}/` (public, optional) | None | JSON | bootstrap 15 min cadence; element-summary 60 s **only** for the user's 15 selected players during live windows; no `/api/draft/*` (404 without session — D4) |
 | **ESPN** | `GET https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard` · `.../eng.1/news` · `.../eng.1/standings` (optional) | None | JSON | scoreboard 30 s **only in live windows**; news 30 min |
-| **BBC** | `GET https://feeds.bbci.co.uk/sport/football/rss.xml` (+ on-demand article page fetch) | None | RSS 2.0 XML | 30 min cadence (15 min in GW-eve window); PL filter (V6); article fetch on-demand only (D13) |
-| **Reddit** | `GET https://www.reddit.com/r/FantasyPL/hot.rss` (also `new.rss`, `top.rss?t=week`); thread bodies `GET /r/FantasyPL/comments/{id}.rss` | None (OAuth app optional, documented) | **Atom** XML | 30 min cadence; `hot.json` is bot-blocked — do not use; filter pinned megathread (V5); static descriptive UA |
+| **BBC** | `GET https://feeds.bbci.co.uk/sport/football/rss.xml` (+ on-demand article page fetch) | None | RSS 2.0 XML | 30 min cadence (15 min in GW-eve window); PL filter (V6); article fetch: auto for new PL-relevant items (≤ `max_bodies_per_poll` pages/poll) + on-demand button (D13 superseded, FIX.MD Task 3) |
+| **Reddit** | RSS: `GET https://www.reddit.com/r/FantasyPL/hot.rss` (also `new.rss`, `top.rss?t=week`); thread bodies `GET /r/FantasyPL/comments/{id}.rss` · OAuth (v1.0.1): `hot.json` + `/comments/{id}.json` | None (OAuth client-credentials optional, implemented in v1.0.1) | **Atom** XML (RSS) or JSON (OAuth) | 30 min cadence; `hot.json` is bot-blocked for anonymous access, and `www.reddit.com/*.json` 403s even with a valid token — the OAuth-mode path goes via `oauth.reddit.com` (verified 2026-09-21); filter pinned megathread (V5); static descriptive UA |
 | **YouTube** | Channel RSS `GET https://www.youtube.com/feeds/videos.xml?channel_id={id}`; transcripts via yt-dlp subprocess (D11) | None | Atom XML + VTT | RSS 1 h cadence; max 3 transcript fetches per poll; transcript only for priority videos (V7/V8) |
 | **LLM** | `POST {LLM_BASE_URL}/chat/completions` (default `http://localhost:8888/v1`) | User's API key (401 without, V10) | JSON | 60 s timeout; batch ≤ ~8k input chars/call; **ASK** model name at M2 start |
 | **Yahoo** (optional) | TBA — verify at M4 (V11) | None | JSON | Drop silently if it fails |
@@ -237,7 +237,7 @@ BPS is supplied by Opta and final once the GW is marked final.
 ## 6. Architecture
 
 ### 6.1 Stack
-- **Backend**: Python 3.11+, **FastAPI**, **APScheduler** (AsyncIOScheduler), **SQLite** (stdlib `sqlite3` + thin async wrapper; no ORM), **httpx** (async), **feedparser** (RSS/Atom), **yt-dlp** (subprocess, D11), **python-dotenv**, **pydantic** (v2, request/response models). Optional: **PuLP** (exact solver toggle).
+- **Backend**: Python 3.11+, **FastAPI**, **APScheduler** (AsyncIOScheduler), **SQLite** (stdlib `sqlite3` + thin async wrapper; no ORM), **httpx** (async), **feedparser** (RSS/Atom), **yt-dlp** (subprocess, D11), **python-dotenv**, **pydantic** (v2, request/response models).
 - **Frontend**: React 18 + Vite + **TypeScript**, React Router (5 routes), plain CSS (single `app.css`, dark theme default), native `EventSource` for SSE. No UI framework, no state library (React state + a small `useApi`/`useSSE` hook layer).
 - **Process model**:
   - **Dev**: FastAPI (uvicorn, port 8000, `--reload`) + Vite dev server (port 5173, proxy `/api` → 8000).
@@ -271,7 +271,7 @@ fpl-tracker/                      ← this workspace root
 │   │   │   ├── rules.py          # constraint validator (§5, single source of truth)
 │   │   │   ├── scoring.py        # EP model (§7.2 of outline; Part 2 T1.6)
 │   │   │   ├── transfers.py      # transfer math + chip advice
-│   │   │   └── solver.py         # multi-start hill climbing (+ optional PuLP)
+│   │   │   └── solver.py         # multi-start hill climbing
 │   │   ├── live/
 │   │   │   ├── compute.py        # live totals, auto-bench sim, bonus race, countdown
 │   │   │   └── sse.py            # SSE hub (event bus, hello snapshot, keepalive)
@@ -665,7 +665,7 @@ Frontend shows a confirmation table; user confirms/picks candidates, then POSTs 
   "takeaways": ["Joao Pedro saga continues", "Free hit & wildcard drafts covered"], "processed": true}]
 ```
 
-**`POST /api/items/{id}/fetch-body`** (BBC on-demand article, D13) → `{body: "..."}` (404 if item has no fetchable URL).
+**`POST /api/items/{id}/fetch-body`** (BBC on-demand article fallback; new items are auto-fetched — D13 superseded, FIX.MD Task 3) → `{body: "..."}` (404 if item has no fetchable URL).
 
 ### 8.6 SuggestionObject (the core response shape)
 
@@ -817,7 +817,7 @@ Empty `LLM_API_KEY` or `LLM_MODEL` → LLM disabled (rule-based mode, D5). Key n
     "availability": {"doubt": 0.7, "chance_null": 1.0, "chance_100": 1.0, "chance_50": 0.65, "chance_0": 0.0},
     "signal": {"neg_per": -0.5, "neg_cap": -0.6, "pos_per": 0.1, "pos_cap": 0.2},
     "differential_lambda": 3.0,
-    "solver": {"restarts": 20, "timebox_sec": 8, "seed": 42, "exact_ilp": false}
+    "solver": {"restarts": 20, "timebox_sec": 8, "seed": 42}
   },
   "group": {"fpl_entry_id": ""},
   "ui": {"theme": "dark"}

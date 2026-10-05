@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import config as cfgmod
-from .api import lineups, meta, news, players, suggestions
+from .api import entry, lineups, meta, news, players, suggestions
 from .db import init_db
 from .fetchers import fpl as fpl_fetcher
 from .httpclient import http
@@ -72,6 +72,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(meta.router, prefix="/api")
+    app.include_router(entry.router, prefix="/api")
     app.include_router(players.router, prefix="/api")
     app.include_router(lineups.router, prefix="/api")
     app.include_router(suggestions.router, prefix="/api")

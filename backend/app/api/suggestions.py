@@ -10,7 +10,10 @@ from .. import season as season_svc
 from ..config import load_settings
 from ..db import execute, now_utc, query, query_one
 from ..optimizer import transfers as tmath
+from ..optimizer.rules import TRANSFER_CAP
 from ..optimizer.solver import PROFILES, SolveParams, dedupe_profiles, solve
+from ..optimizer.transfers import chip_covers_transfers
+from .lineups import _decrement_chips
 
 log = logging.getLogger("fpl.api.suggestions")
 router = APIRouter()
@@ -43,15 +46,21 @@ async def generate(body: dict) -> dict:
     lineup = query_one("SELECT * FROM lineups WHERE id = ?", (lid,)) if lid else None
     if not lineup:
         raise HTTPException(422, "lineup_id missing or not found")
+    requested = body.get("target_gw")
     season = season_svc.current_season()
-    target_gw = season["next_gw"] or season["current_gw"]
+    target_gw = requested or season["next_gw"] or season["current_gw"]
     if not target_gw:
         raise HTTPException(503, "no season data yet — refresh FPL first")
+    if requested is not None:
+        total = season.get("events_total") or 38
+        if not (1 <= int(requested) <= total):
+            raise HTTPException(422, f"target_gw must be 1–{total}")
 
     settings = load_settings()
     chips = json.loads(lineup["chips"])
     current_squad = _current_squad_for_diff(lid)
     signals = _current_signals()
+    chip_covers = chip_covers_transfers(chips, target_gw)
 
     results = {}
     for profile in PROFILES:
@@ -63,6 +72,7 @@ async def generate(body: dict) -> dict:
             profile=profile,
             cfg=settings.config,
             signals_by_player=signals,
+            lineup_id=lid,
         )
         try:
             results[profile] = solve(params)
@@ -73,27 +83,64 @@ async def generate(body: dict) -> dict:
     if not any(results.values()):
         raise HTTPException(500, "all profiles failed to solve — check FPL data freshness")
 
-    dedupe_profiles({k: v for k, v in results.items() if v})
+    dedupe_profiles({k: v for k, v in results.items() if v},
+                    tctx=next(v.tctx for v in results.values() if v))
 
     out = []
     for profile in PROFILES:
         s = results.get(profile)
         if s is None:
             continue
-        diff = tmath.compute_diff(current_squad, s.squad, lineup["transfer_bank"], chips)
+        diff = tmath.compute_diff(
+            current_squad, s.squad, lineup["transfer_bank"], chips,
+            chip_covers=chip_covers,
+            ep_by_player={p["id"]: p["ep"] for p in s.universe},  # FIX T9
+        )
+        transfers_n = max(len(diff["transfers_in"]), len(diff["transfers_out"]))
+        cap_ok = transfers_n <= TRANSFER_CAP or chip_covers
+        diff["transfer_cap_exceeded"] = not cap_ok
+        if not cap_ok:
+            log.warning("profile %s: %d transfers exceed the %d-transfer cap without a chip — flagged",
+                        profile, transfers_n, TRANSFER_CAP)
+        # D3: the headline score must show the transfer penalty honestly.
+        projected = dict(s.projected_points)          # {baseline, adjusted, with_captain}
+        projected["penalty_points"] = diff["penalty_points"]
+        projected["net_after_transfers"] = round(s.projected_points["adjusted"] - diff["penalty_points"], 1)
         try:
             advice = tmath.chip_advice_v2(diff, chips, s, season["current_gw"],
-                                          season["next_gw"], settings.config, signals)
+                                          target_gw, settings.config, signals)
         except Exception:
             log.exception("chip_advice_v2 failed — falling back to v1")
+            # A13: pass the SAME target GW as the primary path — the Free-Hit
+            # ban is derived from it, so a fallback must not judge another GW.
             advice = tmath.chip_advice_v1(diff, chips, season["current_gw"],
-                                          season["next_gw"], settings.config)
+                                          target_gw, settings.config)
+        if chip_covers:
+            covering = [a for a in advice if a["chip"] in ("wildcard", "freehit")
+                        and a.get("recommendation") != "skip"]
+            if not covering:
+                log.warning("profile %s: chip_covers=True but no wildcard/free-hit advice is "
+                            "non-skip — impossible post-fix, possible regression", profile)
         rationale = {
             "per_player": {},
             "notes": s.notes,
         }
         if s.variant_of:
             rationale["notes"].insert(0, f"variant of {s.variant_of} — same best team found")
+        if not cap_ok:
+            rationale["notes"].insert(0, (
+                f"WARNING: {transfers_n} transfers exceeds the {TRANSFER_CAP}-transfer hard cap "
+                "and no chip covers this GW — invalid in FPL, do not apply"
+            ))
+        if diff["penalty_points"] > 0:
+            # Post-fix a penalty can only come from a forced overrun
+            # (unavailable players) — the solver never adds voluntary extras.
+            sctx = getattr(s, "tctx", None)
+            forced = sctx.forced_transfers if sctx is not None else transfers_n
+            rationale["notes"].insert(0, (
+                f"{forced} forced replacements exceed your bank of {lineup['transfer_bank']} — "
+                f"FPL will charge −{diff['penalty_points']} pts; no voluntary transfers were added."
+            ))
         ts = now_utc()
         sid = execute(
             """INSERT INTO suggestions (lineup_id, profile, variant_of, generated_at, target_gw,
@@ -101,7 +148,7 @@ async def generate(body: dict) -> dict:
                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 lid, profile, s.variant_of, ts, target_gw,
-                json.dumps(s.projected_points), s.objective, json.dumps(diff),
+                json.dumps(projected), s.objective, json.dumps(diff),
                 json.dumps(advice), json.dumps(rationale), json.dumps(s.squad),
             ),
         )
@@ -112,7 +159,7 @@ async def generate(body: dict) -> dict:
                 "variant_of": s.variant_of,
                 "generated_at": ts,
                 "target_gw": target_gw,
-                "projected_points": s.projected_points,
+                "projected_points": projected,
                 "objective": s.objective,
                 "diff": diff,
                 "chip_advice": advice,
@@ -169,7 +216,25 @@ async def apply_suggestion(sid: int) -> dict:
     if row["applied_at"]:
         return {"applied": sid, "already": True,
                 "bank_after": json.loads(row["diff"])["bank_after"], "chips_logged": []}
+    # A16 (rev 2): applying is a TEAM-LEVEL act — it logs chips into
+    # chip_plays_log (which drives the Free-Hit ban) and rewrites the bank. A
+    # suggestion generated from a test (sandbox) lineup must never do that, and
+    # neither may one whose lineup has since been deleted (lineup_id NULL after
+    # ON DELETE SET NULL — the bank update would silently no-op while the chip
+    # rows were still written).
+    lineup = (query_one("SELECT kind FROM lineups WHERE id = ?", (row["lineup_id"],))
+              if row["lineup_id"] else None)
+    if lineup is None:
+        raise HTTPException(409, "the lineup this suggestion was generated from no longer "
+                                 "exists — regenerate the suggestion")
+    if lineup["kind"] == "test":
+        raise HTTPException(422, "this suggestion was generated from a test (sandbox) lineup — "
+                                 "apply is disabled; generate from your real lineup instead")
     diff = json.loads(row["diff"])
+    if diff.get("transfer_cap_exceeded"):
+        raise HTTPException(
+            422, "suggestion exceeds the 20-transfer cap and no chip covers this GW — "
+                 "invalid in FPL, do not apply")
     advice = json.loads(row["chip_advice"])
     ts = now_utc()
     execute("UPDATE lineups SET transfer_bank = ? WHERE id = ?",
@@ -183,5 +248,10 @@ async def apply_suggestion(sid: int) -> dict:
                 (row["lineup_id"], row["target_gw"], c["chip"], ts),
             )
             logged.append(c["chip"])
+    # FIX T3: subtract played chips from the lineup's in-hand sets — otherwise
+    # the lineup keeps claiming a wildcard forever (the Wildcard-side twin of
+    # the B1 ban bug) and the next generate re-opens the unlimited-transfers hole.
+    if logged:
+        _decrement_chips(row["lineup_id"], logged)
     execute("UPDATE suggestions SET applied_at = ? WHERE id = ?", (ts, sid))
     return {"applied": sid, "bank_after": diff["bank_after"], "chips_logged": logged}

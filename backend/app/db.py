@@ -6,12 +6,15 @@ Per-call connections, WAL mode, foreign keys on. All timestamps are UTC strings
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .config import DB_PATH
+
+log = logging.getLogger("fpl.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -222,6 +225,7 @@ CREATE TABLE IF NOT EXISTS raw_items (
   content_hash TEXT NOT NULL,                  -- sha256(source|title|body[:2000])
   takeaways TEXT,                              -- JSON list of one-line takeaways
   processed INTEGER NOT NULL DEFAULT 0,        -- 1 = signal extraction completed
+  extract_attempts INTEGER NOT NULL DEFAULT 0, -- FIX N10/N13: LLM/transcript retry counter
   retrieved_at TEXT NOT NULL,
   UNIQUE(source, content_hash)
 );
@@ -431,6 +435,10 @@ def init_db(path: str | Path | None = None) -> None:
         lup = _table_columns(conn, "lineups")
         if lup and "kind" not in lup:
             conn.execute("ALTER TABLE lineups ADD COLUMN kind TEXT NOT NULL DEFAULT 'current'")
+        # FIX N10 migration: raw_items.extract_attempts (additive, retry counter)
+        ri = _table_columns(conn, "raw_items")
+        if ri and "extract_attempts" not in ri:
+            conn.execute("ALTER TABLE raw_items ADD COLUMN extract_attempts INTEGER NOT NULL DEFAULT 0")
         conn.executescript(SCHEMA)
         conn.commit()
     finally:
@@ -601,14 +609,25 @@ def upsert_events(events: list[dict]) -> int:
     return len(rows)
 
 
+# FPL's bootstrap-static chips[] uses "3xc"; the app's UI/config/advice all use
+# "triple_captain". Normalise on ingest so `chips.name` is always the app's
+# spelling — `raw_json` keeps the upstream value for forensics.
+CHIP_NAME_MAP = {"3xc": "triple_captain", "3x_captain": "triple_captain",
+                 "free_hit": "freehit", "bench_boost": "bboost",
+                 "wildcard": "wildcard", "freehit": "freehit", "bboost": "bboost"}
+
+
 def upsert_chips(chips: list[dict]) -> int:
     ts = now_utc()
     rows = []
     seen: dict[str, int] = {}
     for c in chips:
-        name = c.get("name")
-        if not name:
+        raw_name = c.get("name")
+        if not raw_name:
             continue
+        name = CHIP_NAME_MAP.get(raw_name, raw_name)
+        if name != raw_name:
+            log.warning("chips[] name drift: %r → %r", raw_name, name)
         seen[name] = seen.get(name, 0) + 1
         rows.append(
             (
@@ -659,20 +678,30 @@ def set_meta(key: str, value: str) -> None:
 
 
 def check_season_rollover(season_marker: str) -> bool:
-    """Wipe season-scoped tables if the season marker changed. Returns True if wiped."""
+    """Wipe season-scoped tables if the season marker changed. Returns True if wiped.
+
+    PRAGMA foreign_keys=ON → children MUST be deleted before their parents
+    (lineup_players/live_matches/live_player_points/official_news_cache all
+    reference players or fixtures).
+    """
     stored = get_meta("season")
     if stored and stored == season_marker:
         return False
     conn = get_conn()
     try:
         for table in (
-            "players", "fixtures", "events", "chips", "signals",
-            "live_matches", "live_player_points", "official_news_cache",
+            # children first
+            "lineup_players", "suggestions", "live_matches", "live_player_points",
+            "official_news_cache", "signals", "raw_items",
+            # season-scoped logs: a stale GW row would keep the Free-Hit ban alive
+            # into the new season and UNIQUE(gw, chip) would block re-logging.
+            "chip_plays_log",
+            # parents
+            "players", "fixtures", "events", "chips",
+            # lineups last (lineup_players/suggestions already gone)
+            "lineups",
         ):
             conn.execute(f"DELETE FROM {table}")
-        conn.execute("DELETE FROM lineup_players")
-        conn.execute("DELETE FROM lineups")
-        conn.execute("DELETE FROM suggestions")
         conn.execute("DELETE FROM meta WHERE key = 'season'")
         conn.commit()
     finally:

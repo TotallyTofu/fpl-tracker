@@ -31,16 +31,19 @@ async def list_signals(player_id: int | None = None, team: str | None = None,
                JOIN players p ON p.id = s.player_id
                LEFT JOIN teams t ON t.id = p.team"""
         )
+        where: list[str] = []
         params: list = []
         if player_id is not None:
-            sql += " WHERE s.player_id = ?"
+            where.append("s.player_id = ?")
             params.append(player_id)
         if team:
-            sql += ("" if player_id is not None else " WHERE ") + " AND t.short_name = ?"
+            where.append("t.short_name = ?")
             params.append(team.upper())
         if category:
-            sql += " AND s.category = ?"
+            where.append("s.category = ?")
             params.append(category)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY s.retrieved_at DESC LIMIT 500"
         rows = query(sql, params)
     return {"signals": rows, "count": len(rows)}

@@ -63,11 +63,14 @@ FIXTURES_GW6 = [
     (6, 3, 4, "2026-09-26T17:30:00Z", 2, 1),
 ]
 
+# Real API spelling (bootstrap-static chips[]): "3xc", not "triple_captain".
+# Inserted through the real ingest path (dbmod.upsert_chips) so the fixture
+# exercises the same normalisation production uses (FIX.MD A1 / §10.1).
 CHIPS = [
-    (1, "wildcard", 1, 1, 38, "wildcard", 1),
-    (2, "freehit", 1, 1, 38, "free_hit", 1),
-    (3, "bboost", 1, 6, 6, "3x_points", 1),
-    (4, "triple_captain", 1, 6, 6, "3x_captain", 1),
+    {"id": 1, "name": "wildcard", "number": 1, "start_event": 1,  "stop_event": 38, "chip_type": "wildcard"},
+    {"id": 2, "name": "freehit",  "number": 1, "start_event": 1,  "stop_event": 38, "chip_type": "free_hit"},
+    {"id": 3, "name": "bboost",   "number": 1, "start_event": 6,  "stop_event": 6,  "chip_type": "3x_points"},
+    {"id": 4, "name": "3xc",      "number": 1, "start_event": 6,  "stop_event": 6,  "chip_type": "3x_captain"},
 ]
 
 
@@ -89,11 +92,8 @@ def db_path(tmp_path, monkeypatch):
         "VALUES (?,?,?,?, 'not_started', ?, ?, ?)",
         [(f[0], f[1], f[2], f[3], f[4], f[5], NOW) for f in FIXTURES_GW6],
     )
-    conn.executemany(
-        "INSERT INTO chips (id, name, number, start_event, stop_event, chip_type, set_index, fetched_at) "
-        "VALUES (?,?,?,?,?,?,?,?)",
-        [(c[0], c[1], c[2], c[3], c[4], c[5], c[6], NOW) for c in CHIPS],
-    )
+    conn.commit()          # release the fixture connection's write lock first!
+    dbmod.upsert_chips(CHIPS)
     conn.executemany(
         "INSERT INTO players (id, web_name, element_type, team, now_cost, ep_next, selected_by_percent, "
         "status, can_select, removed, chance_of_playing_next_round, form, fetched_at) "
@@ -115,7 +115,8 @@ def cfg():
             differential_lambda=3.0,
             differential_ep_floor=0.4,
             availability=types.SimpleNamespace(
-                active=False, doubt=0.5, chance_null=0.9, chance_100=1.0, chance_50=0.5, chance_0=0.0
+                active=False, doubt=0.5, chance_null=0.9, chance_100=1.0,
+                chance_75=0.85, chance_50=0.5, chance_25=0.35, chance_0=0.0
             ),
             signal=types.SimpleNamespace(neg_per=-0.5, neg_cap=-0.6, pos_per=0.1, pos_cap=0.2),
         )

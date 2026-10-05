@@ -1,8 +1,11 @@
 // Shared TS types mirroring PLAN.MD §8 (backend API shapes).
 
+// A23: mirrors season.active_chip_windows() exactly — there is no `event`.
 export interface ChipWindow {
   chip: string;
-  event: number;
+  set: number;
+  start_event: number;
+  stop_event: number;
   playable_next_gw: boolean;
 }
 
@@ -77,6 +80,11 @@ export interface LineupPlayer {
   bought_cost: number | null;
 }
 
+// A23: a suggested squad (SuggestedLineup.squad) is a LineupPlayer minus
+// bought_cost — purchase prices only exist for stored lineups, and the solver
+// has no way to know them for players you don't own yet.
+export type SquadPlayer = Omit<LineupPlayer, "bought_cost">;
+
 export interface Lineup {
   id: number;
   name: string;
@@ -106,12 +114,14 @@ export interface TransferIn {
   player_id: number;
   web_name: string;
   cost: number;
+  ep?: number | null;
 }
 
 export interface TransferOut {
   player_id: number;
   web_name: string;
   sell_value: number;
+  ep?: number | null;
 }
 
 export interface Diff {
@@ -122,6 +132,11 @@ export interface Diff {
   free_transfers_used: number;
   bank_after: number;
   penalty_points: number;
+  transfer_cap_exceeded?: boolean;
+  chip_covers?: boolean;
+  bank_before?: number;
+  budget_before?: number;
+  budget_after?: number;
 }
 
 export interface ChipAdvice {
@@ -131,7 +146,7 @@ export interface ChipAdvice {
 }
 
 export interface SuggestedLineup {
-  squad: LineupPlayer[];
+  squad: SquadPlayer[];
   xi: number[];
   captain: number;
   vice_captain: number;
@@ -144,7 +159,13 @@ export interface Suggestion {
   variant_of: string | null;
   generated_at: string;
   target_gw: number;
-  projected_points: { baseline: number; adjusted: number; with_captain: number };
+  projected_points: {
+    baseline: number;
+    adjusted: number;
+    with_captain: number;
+    penalty_points?: number;
+    net_after_transfers?: number;
+  };
   objective: number;
   diff: Diff;
   chip_advice: ChipAdvice[];
@@ -181,6 +202,8 @@ export interface LLMConfig {
   model: string;
   timeout_sec: number;
   batch_chars: number;
+  max_tokens: number;
+  player_list_mode: string; // "filtered" | "full"
 }
 
 export interface YouTubeChannel {
@@ -204,6 +227,8 @@ export interface EspnSource {
 export interface BbcSource {
   enabled: boolean;
   interval_min: number;
+  fetch_bodies: boolean;
+  max_bodies_per_poll: number;
 }
 
 export interface RedditSource {
@@ -257,7 +282,6 @@ export interface SolverConfig {
   restarts: number;
   timebox_sec: number;
   seed: number;
-  exact_ilp: boolean;
 }
 
 export interface OptimizerConfig {
@@ -271,6 +295,36 @@ export interface OptimizerConfig {
 
 export interface GroupConfig {
   fpl_entry_id: string;
+}
+
+export interface EntryLeaguePhase {
+  phase: number;
+  rank: number | null;
+  rank_count: number | null;
+  total: number | null;
+  entry_percentile_rank: number | null;
+}
+
+export interface EntryLeague {
+  league_id: number | null;
+  name: string | null;
+  class: string | null;
+  league_type: string | null;
+  rank: number | null;
+  size: number | null;
+  points: number | null;
+  percentile: number | null;
+  active_phases: EntryLeaguePhase[];
+}
+
+export interface EntryData {
+  entry_id: number | null;
+  name: string | null;
+  overall_points: number | null;
+  overall_rank: number | null;
+  overall_rank_out_of: number | null;
+  overall_percentile: number | null;
+  leagues: EntryLeague[];
 }
 
 export interface UIConfig {
@@ -291,7 +345,6 @@ export interface SettingsResponse {
     key_set: boolean;
     note: string;
   };
-  pulp_available?: boolean;
 }
 
 export interface DbStats {

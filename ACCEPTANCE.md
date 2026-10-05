@@ -1,10 +1,18 @@
 # Acceptance — M4 (v1.0.0)
 
+> **Historical record.** This is the acceptance log for the v1.0.0 milestone, executed on
+> 2026-09-20. Test counts inside ("139 tests") and any command output are **as of that date** —
+> the suite has grown since (currently **280 tests**, plus `scripts/check_name_resolution.py`
+> for the name index). The two later audit rounds are recorded in `FIX.MD` (§0.0 is the current
+> state) and both closed all findings; the notes below flag where a claim here was later
+> superseded by a bug fix.
+
 Executed 2026-09-20 against the live 2026/27 season. Method per criterion:
 **PASS** / **FAIL** / **SKIPPED** + evidence. Criteria AC1–AC8 are from
 `PLAN.MD` §1; AC6 is adjusted to the revised M3 scope (live-match polling was
 dropped per project decision, 2026-09-20); AC7 is skipped per user decision
-(group-rank card not in v1).
+(group-rank card not in v1 — **superseded**: the rank card shipped in v1.0.1 and
+is documented in the README).
 
 ## AC1 — Fresh clone → prod + dev
 
@@ -125,6 +133,23 @@ ships.
 ## Season rollover dry pass (T4.10)
 
 Executed 2026-09-20 against the live 2026/27 season. All 9 items **PASS**.
+
+> **Note (2026-10-02, FIX.MD A10):** the original run predated a rollover bug —
+> with a saved lineup present, the wipe raised `IntegrityError` (children
+> deleted after their parents under `PRAGMA foreign_keys=ON`), so the
+> "old-season signals wiped" claim was not reproducible in that scenario.
+> A10 reorders the deletes (children → parents); re-verified by
+> `tests/test_rollover.py::test_rollover_with_lineups_succeeds` and, end to end
+> through `fetch_bootstrap()`, by
+> `tests/test_rollover.py::test_bootstrap_survives_rollover_with_saved_lineup`.
+>
+> **Re-verified 2026-10-03 (rev 3):** the fix holds. `check_season_rollover`
+> returns `True` with a saved lineup + a `live_matches` row present, wipes
+> `lineups`/`lineup_players`/`chip_plays_log`/`raw_items`, normalises the chip
+> rows (`3xc` → `triple_captain`) and writes the new marker; the call site in
+> `fetch_bootstrap()` also swallows a rollover failure so it can never abort the
+> refresh again. Item 6's "old-season players/signals wiped" is therefore
+> reproducible now.
 
 1. **Rules page** (fetched live via browser, all accordions expanded):
    - Transfers: 1 free transfer/GW after GW1, **−4 pts per extra**, max

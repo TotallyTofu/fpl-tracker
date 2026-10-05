@@ -47,12 +47,14 @@ class EspnSource(BaseModel):
 class BbcSource(BaseModel):
     enabled: bool = True
     interval_min: int = 30
+    fetch_bodies: bool = True        # auto-fetch full article text for new items
+    max_bodies_per_poll: int = 10    # politeness cap per refresh
 
 
 class RedditSource(BaseModel):
     enabled: bool = True
     interval_min: int = 30
-    mode: str = "rss"  # "rss" | "oauth" (oauth support is a documented future extension)
+    mode: str = "rss"  # "rss" | "oauth" (client-credentials, app-only; falls back to RSS)
     oauth_client_id: str = ""
     oauth_client_secret: str = ""
 
@@ -91,8 +93,30 @@ class LLMConfig(BaseModel):
     base_url: str = "http://localhost:8888/v1"
     api_key: str = ""
     model: str = ""
-    timeout_sec: int = 60
+    # FIX N1: wall-clock cap for the non-streaming fallback (and the overall
+    # per-chunk ceiling) — a wedged server must fail in ≤ ~5 min so the
+    # extraction queue keeps moving. NOT a read-timeout workaround.
+    timeout_sec: int = 300
     batch_chars: int = 8000
+    # FIX N1: output cap matches the expected payload (a few hundred tokens).
+    # Gemma is not a thinking model — the old "thinking + answer" rationale was
+    # wrong; a huge cap only lets degenerate generations wander for minutes.
+    max_tokens: int = 2048
+    player_list_mode: str = "filtered"  # "filtered" (named players only) | "full" (whole universe)
+    # FIX N1: streaming budgets — bytes flow while generating, so timeouts
+    # become inactivity guards instead of total-duration ceilings.
+    stream_idle_timeout_sec: int = 90   # SSE read timeout: no tokens for this long = failure
+    chunk_wallclock_sec: int = 300      # asyncio.wait_for belt-and-suspenders per chunk
+    # FIX N1: connect/timeout retries for the non-streaming fallback.
+    retries: int = 2
+    # FIX N6: when the filtered player list is empty (no name resolved) and the
+    # text is long enough, send the full list instead of silently skipping.
+    fallback_full_list: bool = True
+    # FIX N7: truncation for non-YouTube sources (YouTube keeps its override).
+    truncate_chars: int = 8000
+    # FIX N8: time-budget for one extraction pass (items stay pending for the
+    # next pass when exceeded; the scheduler job coalesces).
+    extract_timebox_sec: int = 480
 
 
 class OptimizerWeights(BaseModel):
@@ -108,8 +132,10 @@ class AvailabilityConfig(BaseModel):
     doubt: float = 0.7
     chance_null: float = 1.0
     chance_100: float = 1.0
+    chance_75: float = 0.85   # FIX T2: bucket for 75 ≤ chance < 100
     chance_50: float = 0.65
-    chance_0: float = 0.0
+    chance_25: float = 0.35   # FIX T2: bucket for 25 ≤ chance < 50
+    chance_0: float = 0.0     # FIX T2: also used for 0 < chance < 25 (effectively out)
 
 
 class SignalConfig(BaseModel):
@@ -123,7 +149,9 @@ class SolverConfig(BaseModel):
     restarts: int = 20
     timebox_sec: int = 8
     seed: int = 42
-    exact_ilp: bool = False
+    # FIX T7: hard move budget per restart (0 = disabled). Makes hill-climb
+    # results reproducible across machines; the timebox stays the ceiling.
+    max_moves_per_restart: int = 2000
 
 
 class OptimizerConfig(BaseModel):

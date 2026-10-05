@@ -4,7 +4,7 @@ import { api } from "../api";
 import Countdown from "../components/Countdown";
 import TeamStrip from "../components/TeamStrip";
 import { useSeason } from "../hooks/useSeason";
-import { fmtTime, type Signal } from "../types";
+import { fmtTime, type EntryData, type Signal } from "../types";
 
 export default function Dashboard() {
   const { season, error } = useSeason();
@@ -12,6 +12,9 @@ export default function Dashboard() {
   const [refreshing, setRefreshing] = useState(false);
   const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
   const [signals, setSignals] = useState<Signal[] | null>(null);
+  const [entryCfg, setEntryCfg] = useState(false);
+  const [entry, setEntry] = useState<EntryData | null>(null);
+  const [entryErr, setEntryErr] = useState<string | null>(null);
 
   const loadSignals = () =>
     api
@@ -21,6 +24,16 @@ export default function Dashboard() {
 
   useEffect(() => {
     loadSignals();
+    // Group-rank card (T4.4): only fetch when the user set an entry ID.
+    api
+      .getSettings()
+      .then((s) => {
+        if ((s.group?.fpl_entry_id ?? "").trim()) {
+          setEntryCfg(true);
+          api.getEntry().then(setEntry).catch((e) => setEntryErr(e.message));
+        }
+      })
+      .catch(() => {});
   }, []);
 
   const refreshAll = async () => {
@@ -109,6 +122,75 @@ export default function Dashboard() {
           )}
         </div>
       </div>
+
+      {entryCfg && (
+        <div className="panel" style={{ marginBottom: 14 }}>
+          <h2 style={{ marginTop: 0 }}>My group position</h2>
+          {entryErr ? (
+            <div className="err small">{entryErr}</div>
+          ) : entry === null ? (
+            <div className="muted small">loading…</div>
+          ) : (
+            <>
+              <div className="row" style={{ alignItems: "flex-start", gap: 28 }}>
+                <div>
+                  <div className="big-num">{entry.overall_points ?? "—"}</div>
+                  <div className="muted small">overall points</div>
+                </div>
+                <div>
+                  <div className="big-num">
+                    {entry.overall_rank ? `#${entry.overall_rank.toLocaleString()}` : "—"}
+                  </div>
+                  <div className="muted small">
+                    {entry.overall_percentile != null && entry.overall_rank_out_of
+                      ? `top ${entry.overall_percentile}% of ${entry.overall_rank_out_of.toLocaleString()} entries`
+                      : "rank not published yet"}
+                  </div>
+                </div>
+                {entry.name && (
+                  <div className="muted small" style={{ marginTop: 8 }}>
+                    {entry.name}
+                  </div>
+                )}
+              </div>
+              {entry.leagues.length > 0 && (
+                <div style={{ maxHeight: 220, overflowY: "auto", marginTop: 10 }}>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>League</th>
+                        <th>Rank</th>
+                        <th>Size</th>
+                        <th>Points</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {entry.leagues.map((lg) => (
+                        <tr key={lg.league_id ?? lg.name ?? "league"}>
+                          <td>
+                            {lg.name ?? `#${lg.league_id}`}
+                            {lg.league_type === "x" && (
+                              <span className="badge skip" style={{ marginLeft: 8 }}>
+                                mini-league
+                              </span>
+                            )}
+                          </td>
+                          <td>{lg.rank ? `#${lg.rank.toLocaleString()}` : "—"}</td>
+                          <td className="muted">{lg.size ? lg.size.toLocaleString() : "—"}</td>
+                          <td>{lg.points ?? "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <div className="small muted" style={{ marginTop: 8 }}>
+                updates as gameweeks finalize (official ranks publish after each GW)
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       <div className="grid2">
         <div className="panel">

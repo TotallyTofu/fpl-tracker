@@ -17,13 +17,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
 
 import feedparser
 
 from ..config import ConfigFile
-from ..db import log_poll, now_utc
+from ..db import log_poll, now_utc, query
 from ..httpclient import http
 from ..signals import ingest
 
@@ -75,14 +76,17 @@ def _yt_dlp_cmd() -> list[str]:
 
 
 class YtDlpProvider:
-    """Default: yt-dlp auto-subs (one --write-sub retry on failure)."""
+    """Default: yt-dlp auto-subs (one --write-sub retry on failure).
+
+    FIX N15: prefer human/original captions ("en,en-orig") — auto-caps are
+    noisier for the name matcher."""
 
     def fetch(self, video_id: str) -> str | None:
         tmp = Path(tempfile.mkdtemp(prefix="fpl-yt-"))
         try:
             for flags in (
-                ["--write-auto-sub", "--sub-langs", "en"],
-                ["--write-sub", "--sub-langs", "en"],
+                ["--write-auto-sub", "--sub-langs", "en,en-orig"],
+                ["--write-sub", "--sub-langs", "en,en-orig"],
             ):
                 cmd = [
                     *_yt_dlp_cmd(),
@@ -97,8 +101,8 @@ class YtDlpProvider:
                 except (subprocess.TimeoutExpired, OSError) as e:
                     log.warning("yt-dlp failed for %s: %s", video_id, e)
                     continue
-                vtt = tmp / f"{video_id}.en.vtt"
-                if vtt.exists():
+                vtt = next(iter(sorted(tmp.glob(f"{video_id}.en*.vtt"))), None)
+                if vtt is not None:
                     text = vtt_to_text(str(vtt))
                     vtt.unlink(missing_ok=True)  # VTT is an intermediate artifact
                     if text.strip():
@@ -184,10 +188,27 @@ def is_short(url: str) -> bool:
     return "/shorts/" in (url or "")
 
 
-def priority(title: str, keywords: list[str]) -> int:
-    """1 if the title matches a transcript keyword, else 0."""
-    t = (title or "").lower()
-    return 1 if any(k.lower() in t for k in keywords) else 0
+def priority(title: str, description: str, keywords: list[str]) -> int:
+    """1 if the title OR description matches a transcript keyword, else 0.
+
+    FIX N14: descriptions carry chapter lists and show names ("Weekender",
+    "COTC" appear in the description far more often than in the title)."""
+    hay = f"{(title or '').lower()} {(description or '').lower()}"
+    return 1 if any(k.lower() in hay for k in keywords) else 0
+
+
+def _provider_for(attempts: int, base: TranscriptProvider) -> TranscriptProvider:
+    """FIX N15: after one failed yt-dlp attempt for a video (the N13 attempts
+    counter), give the youtube-transcript-api backend a shot instead — yt-dlp
+    fails wholesale when Node.js is missing, and the API backend is the
+    documented alternative (env YOUTUBE_TRANSCRIPT_BACKEND=api)."""
+    if attempts >= 1:
+        try:
+            import youtube_transcript_api  # noqa: F401
+        except ImportError:
+            return base
+        return TranscriptApiProvider()
+    return base
 
 
 def parse_feed(xml_text: str) -> list[dict]:
@@ -223,7 +244,8 @@ async def refresh_youtube(cfg: ConfigFile, provider: TranscriptProvider | None =
                 if is_short(it["url"]):
                     prio = 0
                 else:
-                    prio = priority(it["title"], ycfg.transcript_keywords)
+                    # FIX N14: match keywords against title AND description
+                    prio = priority(it["title"], it["description"], ycfg.transcript_keywords)
                 rowid = ingest.ingest_item(
                     source=SOURCE,
                     external_id=it["video_id"],
@@ -251,8 +273,48 @@ async def refresh_youtube(cfg: ConfigFile, provider: TranscriptProvider | None =
                         )
                         ingest.update_body(rowid, body, mark_pending=True)
                         transcripts += 1
+
+        # FIX N13: transcript backlog retry — Stage B used to run on brand-new
+        # rows only, so one failed yt-dlp attempt (429, caption missing, no
+        # Node.js) lost the transcript forever. Retry recent priority videos
+        # without the marker, budget-capped, counting attempts per video
+        # (reuses raw_items.extract_attempts, the FIX N10 column).
+        backlog_fetched = 0
+        if transcripts < ycfg.max_transcripts_per_poll:
+            three_days_ago = (datetime.now(timezone.utc) - timedelta(days=3)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+            backlog = query(
+                """SELECT id, title, body, external_id, extract_attempts FROM raw_items
+                   WHERE source = 'youtube' AND kind = 'video' AND processed = 1
+                     AND (body IS NULL OR body NOT LIKE '%--- TRANSCRIPT ---%')
+                     AND retrieved_at >= ?
+                   ORDER BY retrieved_at DESC""",
+                (three_days_ago,),
+            )
+            for row in backlog:
+                if transcripts >= ycfg.max_transcripts_per_poll:
+                    break
+                attempts = int(row.get("extract_attempts") or 0)
+                if attempts >= 3:
+                    continue  # stop chasing a video after 3 failed attempts
+                if not priority(row.get("title") or "", row.get("body") or "",
+                                ycfg.transcript_keywords):
+                    continue
+                if row.get("body") and _TRANSCRIPT_MARKER in row["body"]:
+                    continue  # double-fetch guard
+                text = await _to_thread(
+                    _provider_for(attempts, provider).fetch, row["external_id"])
+                ingest.bump_extract_attempts(row["id"])   # count every attempt
+                if text:
+                    body = (f"{row['body']}\n\n{_TRANSCRIPT_MARKER}\n{text}"
+                            if row.get("body") else f"{_TRANSCRIPT_MARKER}\n{text}")
+                    ingest.update_body(row["id"], body, mark_pending=True)
+                    transcripts += 1
+                    backlog_fetched += 1
+
         log_poll(SOURCE, "ok", rows=stored, started_at=started)
-        return {"status": "ok", "rows": stored, "transcripts_fetched": transcripts}
+        return {"status": "ok", "rows": stored, "transcripts_fetched": transcripts,
+                "backlog_transcripts": backlog_fetched}
     except Exception as e:
         log_poll(SOURCE, "error", error=f"{type(e).__name__}: {e}"[:500], started_at=started)
         log.exception("youtube refresh failed")

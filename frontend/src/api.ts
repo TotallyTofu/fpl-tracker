@@ -2,6 +2,7 @@
 import type {
   DbStats,
   Diff,
+  EntryData,
   Health,
   Lineup,
   LineupSummary,
@@ -134,9 +135,14 @@ export const api = {
 
   getSettings: () => req<SettingsResponse>("/settings"),
   putSettings: (body: unknown) => req<SettingsResponse>("/settings", { method: "PUT", body: JSON.stringify(body) }),
-  testLlm: () => req<{ ok: boolean; error?: string; model?: string; reply?: string }>("/settings/test-llm", { method: "POST" }),
+  testLlm: (body?: { base_url?: string; api_key?: string; model?: string }) =>
+    req<{ ok: boolean; error?: string; model?: string; reply?: string }>("/settings/test-llm", {
+      method: "POST",
+      body: JSON.stringify(body ?? {}),
+    }),
   clearSignals: () => req<{ cleared: number }>("/signals/clear", { method: "POST" }),
   getDbStats: () => req<DbStats>("/meta/db-stats"),
+  getEntry: () => req<EntryData>("/entry"),
 };
 
 export type { Diff };

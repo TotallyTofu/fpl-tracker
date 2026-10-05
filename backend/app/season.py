@@ -4,9 +4,12 @@ All times UTC; the UI converts to local time.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 from .db import get_meta, query
+
+log = logging.getLogger("fpl.season")
 
 CHIPS = ("wildcard", "freehit", "bboost", "triple_captain")
 
@@ -65,6 +68,11 @@ def active_chip_windows() -> list[dict]:
     next_gw = nxt["id"] if nxt else (cur + 1 if cur else None)
     out = []
     for c in chips:
+        if c["name"] not in CHIPS:
+            # Defensive: an unrecognised name (e.g. a future API rename that
+            # ingest failed to normalise) must not silently disable a chip.
+            log.warning("chips table has unknown chip name %r — skipping", c["name"])
+            continue
         covers_next = next_gw is not None and c["start_event"] <= next_gw <= c["stop_event"]
         covers_cur = cur is not None and c["start_event"] <= cur <= c["stop_event"]
         if covers_next or covers_cur:

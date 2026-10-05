@@ -14,7 +14,10 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any
+
+import httpx
 
 from ..db import (
     check_season_rollover,
@@ -110,8 +113,14 @@ async def fetch_bootstrap() -> dict[str, Any]:
 
     events = data.get("events", [])
     marker = _season_marker(events)
-    if marker != "unknown" and check_season_rollover(marker):
-        log.warning("season rollover detected → wiped season-scoped tables (marker=%s)", marker)
+    if marker != "unknown":
+        try:
+            if check_season_rollover(marker):
+                log.warning("season rollover detected → wiped season-scoped tables (marker=%s)", marker)
+        except Exception:
+            # A failed wipe must not abort the refresh: the app keeps running on
+            # last-good data and the next bootstrap retries the rollover.
+            log.exception("season rollover failed — continuing on last-good data")
 
     n_players = upsert_players(data.get("elements", []))
     n_teams = upsert_teams(data.get("teams", []))
@@ -318,6 +327,104 @@ async def fetch_live_player_points(player_ids: list[int]) -> list[dict]:
     if changed:
         log_poll("fpl", "ok", rows=len(changed))
     return changed
+
+
+# ---------------------------------------------------------------------------
+# Public entry (optional group context — T4.4 / PLAN.MD §8.8)
+# ---------------------------------------------------------------------------
+
+ENTRY_CACHE_TTL_SEC = 15 * 60
+_entry_cache: dict[str, Any] = {"entry_id": None, "fetched_at": None, "data": None}
+
+
+def clear_entry_cache() -> None:
+    _entry_cache.update({"entry_id": None, "fetched_at": None, "data": None})
+
+
+def _entry_cache_fresh(entry_id: str) -> bool:
+    if _entry_cache["entry_id"] != entry_id or _entry_cache["data"] is None:
+        return False
+    try:
+        fetched = datetime.fromisoformat(str(_entry_cache["fetched_at"]).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return (datetime.now(timezone.utc) - fetched).total_seconds() < ENTRY_CACHE_TTL_SEC
+
+
+def _normalize_entry(data: dict) -> dict:
+    """2026/27 entry payload → §8.8 shape.
+
+    The live API drifted from the original plan (verified 2026-09-21):
+    top-level ``overall_points``/``rank``/``rank_out_of`` are now
+    ``summary_overall_points``/``summary_overall_rank`` with no explicit
+    overall denominator (the largest classic ``rank_count`` is the global
+    pool), and ``leagues`` is a dict of lists keyed by kind (``classic``,
+    ``h2h``, ``cup``, ...) instead of a flat list. Custom mini-leagues appear
+    as ``league_type: "x"``.
+    """
+    leagues_raw = data.get("leagues") or {}
+    rows = list(leagues_raw.get("classic") or []) + list(leagues_raw.get("h2h") or [])
+    leagues = [
+        {
+            "league_id": lg.get("id"),
+            "name": lg.get("name"),
+            "class": lg.get("class"),
+            "league_type": lg.get("league_type"),
+            "rank": lg.get("rank"),
+            "size": lg.get("rank_count"),
+            "points": lg.get("total"),
+            "percentile": lg.get("entry_percentile_rank"),
+            "active_phases": lg.get("active_phases") or [],
+        }
+        for lg in rows
+    ]
+    overall_points = data.get("summary_overall_points")
+    overall_rank = data.get("summary_overall_rank")
+    counts = [lg["size"] for lg in leagues if isinstance(lg.get("size"), int)]
+    overall_rank_out_of = max(counts) if counts else None
+    overall_percentile = (
+        round(overall_rank / overall_rank_out_of * 100, 1)
+        if isinstance(overall_rank, int) and overall_rank_out_of
+        else None
+    )
+    return {
+        "entry_id": data.get("id"),
+        "name": data.get("name"),
+        "overall_points": overall_points,
+        "overall_rank": overall_rank,
+        "overall_rank_out_of": overall_rank_out_of,
+        "overall_percentile": overall_percentile,
+        "leagues": leagues,
+    }
+
+
+async def fetch_entry(entry_id: str, force: bool = False) -> dict | None:
+    """GET /api/entry/{id}/ → normalized §8.8 dict; ``None`` when the entry
+    does not exist (upstream 404). Cached 15 min in-memory; every live fetch
+    is logged to poll_log (source ``entry``).
+
+    Note: the shared httpclient also retries 4xx (2 retries, ~6 s backoff),
+    so an invalid ID takes a few seconds to surface as a friendly 400 —
+    acceptable for a one-off user typo.
+    """
+    if not force and _entry_cache_fresh(entry_id):
+        return _entry_cache["data"]
+    started = now_utc()
+    try:
+        data = await http.get_json(f"{BASE}/entry/{entry_id}/")
+    except httpx.HTTPStatusError as e:
+        if e.response is not None and e.response.status_code == 404:
+            log_poll("entry", "error", error=f"entry {entry_id} not found", started_at=started)
+            return None
+        log_poll("entry", "error", error=f"entry fetch failed: {e}", started_at=started)
+        raise
+    except Exception as e:
+        log_poll("entry", "error", error=f"entry fetch failed: {e}", started_at=started)
+        raise
+    normalized = _normalize_entry(data)
+    _entry_cache.update({"entry_id": entry_id, "fetched_at": now_utc(), "data": normalized})
+    log_poll("entry", "ok", rows=len(normalized["leagues"]), started_at=started)
+    return normalized
 
 
 def get_season_marker() -> str | None:

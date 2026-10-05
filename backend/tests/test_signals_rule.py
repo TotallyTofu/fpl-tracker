@@ -13,7 +13,9 @@ from app.signals.rule_extractor import (
     ingest_official_news,
 )
 
-NOW = "2026-09-19T12:00:00Z"
+# Relative to wall clock so the fixture never crosses MAX_ITEM_AGE_DAYS (7d) —
+# a hardcoded date here turned the whole file red on 2026-09-26.
+NOW = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _idx(db_path):
@@ -66,6 +68,29 @@ def test_no_fuzzy_matching(db_path):
     idx = _idx(db_path)
     item = _item("Gol One injured", "Gol One is injured and will miss the game.")
     assert extract_signals_rule(item, idx) == []
+
+
+def test_accented_name_resolves_per_sentence(db_path):
+    """§18.3: accented/decomposed names yield the signal — resolve_candidates
+    is called per sentence (the §12 span fix), so NFD-decomposed input can no
+    longer desync from the original-text span slicing."""
+    import unicodedata
+
+    from app.db import execute
+    execute("UPDATE players SET web_name = 'Núñez' WHERE id = 2")
+    idx = _idx(db_path)
+
+    item = _item("Núñez doubt", "Núñez is ruled out with a hamstring injury.")
+    sigs = extract_signals_rule(item, idx)
+    assert any(s["player_id"] == 2 for s in sigs)
+
+    # NFD-decomposed body — the old global-span reuse sliced the ORIGINAL text
+    # with spans computed on the de-accented copy (fragile); per-sentence
+    # resolution is immune.
+    nfd_body = unicodedata.normalize("NFD", "Núñez is ruled out with a hamstring injury.")
+    assert nfd_body != "Núñez is ruled out with a hamstring injury."  # decomposition applied
+    sigs2 = extract_signals_rule(_item("Nunez doubt", nfd_body), idx)
+    assert any(s["player_id"] == 2 for s in sigs2)
 
 
 def test_unmatched_names_dropped(db_path):
@@ -167,3 +192,21 @@ def test_official_news_chance_zero(db_path):
     sigs = ingest_official_news(changed)
     mine = [s for s in sigs if s["player_id"] == 7]
     assert any(s["category"] == "selection" and s["sentiment"] == "negative" for s in mine)
+
+
+def test_rule_skips_data_dump_titles(db_path):
+    """Reddit stats-table titles (net-transfers dumps) must not produce signals."""
+    idx = _idx(db_path)
+    item = _item(
+        "Most Net Transfers In Name Net Transfers Change % Ownership % Goal One 147962 5.3% 26.9%",
+        "",
+        source="reddit",
+    )
+    assert extract_signals_rule(item, idx) == []
+
+
+def test_rule_still_extracts_normal_transfer_news(db_path):
+    idx = _idx(db_path)
+    item = _item("Goal One signed a permanent deal", "", source="reddit")
+    out = extract_signals_rule(item, idx)
+    assert any(s["player_id"] == 1 and s["category"] == "transfer" for s in out)

@@ -66,6 +66,20 @@ YouTube 60 min, extraction 10 min) and the manual refresh buttons.
      a chat) → the matcher resolves each name (exact → known-name → fuzzy
      surname) and reports ✅ matched / 🔍 ambiguous / ❌ no match.
    - Or **pick** players one by one (search + position/team filters).
+   - **Arrange the XI and bench yourself** — the app never overwrites your
+     arrangement: select a player on the pitch (or drag the card) and use
+     **Send to bench** / **Move to XI**; drag cards between the pitch and the
+     bench row, or drop a bench card onto another bench card to reorder
+     (the bench renumbers 1–4 automatically). When the target side is full,
+     the move becomes a **swap** with the lowest-EP eligible player (same
+     position first) — the button tooltip names who it will be. Promoting a
+     GK auto-benches the current GK (FPL allows exactly 1 GK in the XI, and
+     the demoted GK takes the promoted GK's slot, so it works even with a
+     full bench); removing a starter auto-promotes the best same-position
+     bench player; the captain/VC can't be demoted (change captaincy first).
+     New players join the XI while there's room, otherwise the bench.
+     **Auto-pick XI** (Squad panel) restores the EP-based automatic lineup
+     whenever you want it.
    - Set your **transfer bank** (1–5) and any **chips** in hand (wildcard,
      free hit, b. boost, triple captain) with window hints.
    - The panel shows live rule validation (squad size, 2/5/5/3, budget,
@@ -88,7 +102,10 @@ YouTube 60 min, extraction 10 min) and the manual refresh buttons.
    but cannot be applied.
 3. **Dashboard** — season state (current/next GW, deadline countdown, live
    window), quick refresh of all sources, a live **Signals** panel (top 5 active
-   signals, links to News), your current team strip, next-GW fixtures.
+   signals, links to News), your current team strip, next-GW fixtures. When
+   you've set an FPL entry ID (Settings → Group), a **rank card** shows your
+   overall rank + percentile and per-league standings (public entry endpoint,
+   cached 15 min, no login).
 4. **News** — the signal pipeline:
    - **Refresh sources** — per-source buttons (fpl / bbc / espn / reddit /
      youtube / All + extract). Each fetch stores items, then the extraction
@@ -98,19 +115,28 @@ YouTube 60 min, extraction 10 min) and the manual refresh buttons.
      sentiment (green/red dot), category, confidence, summary, source ref,
      expiry. Active signals directly shift projected points (`S(p)`).
    - **Fetched items** — everything pulled (articles/threads/videos) with
-     extraction status and takeaways. BBC items have a **Fetch full article**
-     button (on-demand only — RSS title+description is the scheduled path).
+     extraction status and takeaways. New BBC items get their full article
+      text auto-fetched (capped per poll — `sources.bbc.fetch_bodies` /
+      `max_bodies_per_poll`), so the extractors see the whole story, not just
+      the RSS blurb; the **Fetch full article** button remains as the
+     on-demand fallback for older items.
 5. **Settings** — every knob from `config.json`, organised in six sections:
    - **LLM** — enabled, base URL, model, API key (password input, stored
-     locally only), timeout, batch size, live **Test connection**.
+     locally only), timeout, batch size, **max tokens** (per-request output
+      budget — thinking models spend it reasoning before answering),
+      **player list mode** (`filtered` = only the players the item names are
+      sent to the model, and the call is skipped when it names none; `full` =
+      the whole list), live **Test connection**.
    - **Sources** — per-source enabled toggle + refresh interval (FPL, ESPN,
-     BBC, Reddit with rss/oauth mode, YouTube with the channel list +
+     BBC with the full-article auto-fetch toggle + per-poll cap, Reddit with
+      rss/oauth mode, YouTube with the channel list +
      transcript keywords).
    - **Optimizer** — EP/Form/Fixture weight sliders (sum must be 1.00,
      auto-normalise + reset), availability map, signal coefficients,
-     differential λ + EP floor, solver (restarts, timebox, seed, exact-ILP —
-     greyed out until PuLP is installed).
-   - **Group** — FPL entry ID (optional; the group-rank card is not in v1).
+     differential λ + EP floor, solver (restarts, timebox, seed).
+   - **Group** — FPL entry ID (optional; the number in your FPL team URL).
+     When set, the Dashboard rank card is refreshed every 15 min from the
+     public entry endpoint (no login).
    - **Data** — "Re-fetch all now", "Clear all signals", live DB stats
      (row counts, file size, recent poll errors).
    - **About** — version, sources + ToS posture, disclaimer.
@@ -137,13 +163,27 @@ logged. **Settings → LLM** writes the same values into `config.json`
 (`.env` wins if both are set).
 
 **`config.json`** (all app behaviour; every field editable in the Settings
-page):
+page). It is **gitignored** — it holds your LLM key / Reddit OAuth secret.
+`config.example.json` is the committed template of the pydantic defaults, and
+the app creates a default `config.json` on first run anyway:
 
-- `sources.*` — per-source `enabled` + refresh intervals; `youtube.channels`
+- `sources.*` — per-source `enabled` + refresh intervals; `bbc.fetch_bodies`
+  (auto-fetch full article text for new PL-relevant items) +
+  `bbc.max_bodies_per_poll` (politeness cap, default 10); `youtube.channels`
   (handle + resolved channel_id), `youtube.transcript_keywords`,
-  `max_transcripts_per_poll`; `reddit.mode` (`rss` default / `oauth`).
-- `llm` — `enabled`, `base_url`, `api_key`, `model`, `timeout_sec`,
-  `batch_chars` (≤ ~8k input chars per call).
+  `max_transcripts_per_poll`; `reddit.mode` (`oauth` documented default /
+   `rss` zero-credentials fallback).
+- `llm` — `enabled`, `base_url`, `api_key`, `model`, `timeout_sec` (300 s
+  wall-clock cap for the non-streaming fallback — a wedged server fails in
+  ≤ ~5 min instead of hanging for hours), `batch_chars` (≤ ~8k input chars
+  per call), `max_tokens` (2048 — the output budget matches the expected
+  payload of a few hundred tokens; extractions are streamed, so timeouts act
+  as inactivity guards, not duration ceilings: `stream_idle_timeout_sec` 90,
+  `chunk_wallclock_sec` 300, `retries` 2 for the plain fallback),
+  `player_list_mode` (`filtered` default / `full`) + `fallback_full_list`
+  (send the whole list when the filter resolves no names — recall safety),
+  `truncate_chars` (non-YouTube sources; YouTube keeps its 12k override),
+  `extract_timebox_sec` (480 — time budget per extraction pass).
 - `optimizer.weights` — `{ep: 0.7, form: 0.15, fixture: 0.15}` (must sum to 1).
 - `optimizer.availability` — soft-gate multipliers (doubt ×0.7, chance-50
   ×0.65, chance-0 excluded); `active: true`.
@@ -151,28 +191,27 @@ page):
   cap +0.2).
 - `optimizer.differential_lambda` / `differential_ep_floor` — the
   differential profile's ownership penalty and EP floor (0.4×max).
-- `optimizer.solver` — `restarts: 20`, `timebox_sec: 8`, `seed: 42`,
-  `exact_ilp: false` (needs `pip install pulp`).
-- `group.fpl_entry_id` — optional public FPL entry ID (rank card not in v1).
+- `optimizer.solver` — `restarts: 20`, `timebox_sec: 8`, `seed: 42`.
+- `group.fpl_entry_id` — optional public FPL entry ID (powers the Dashboard rank card).
 
 ## Sources & ToS posture
 
 | Source | Endpoint(s) | Auth | Format | Politeness / gotchas |
 |---|---|---|---|---|
-| **FPL** | `fantasy.premierleague.com/api/bootstrap-static/` · `/api/element-summary/{id}/` · `/api/event/{gw}/` · `/api/game-settings/` | None | JSON | 15-min cadence; element-summary for the user's 15 players only; no `/api/draft/*` (account data — out of scope by design) |
-| **BBC** | `feeds.bbci.co.uk/sport/football/rss.xml` (+ on-demand article fetch) | None | RSS 2.0 | 30-min cadence; PL relevance filter (feed includes WSL/EFL/int'l); full article on demand only |
-| **Reddit** | `reddit.com/r/FantasyPL/hot.rss` (+ `new.rss`, `top.rss?t=week`); thread bodies `/comments/{id}.rss` | None (OAuth optional) | **Atom** | 30-min cadence; pinned megathread filtered; 429s → circuit breaker stops thread fetches for that poll |
+| **FPL** | `fantasy.premierleague.com/api/bootstrap-static/` · `/api/element-summary/{id}/` | None | JSON | 15-min cadence; element-summary for the user's 15 players only; no `/api/draft/*` (account data — out of scope by design) |
+| **BBC** | `feeds.bbci.co.uk/sport/football/rss.xml` (+ article pages) | None | RSS 2.0 | 30-min cadence; PL relevance filter (feed includes WSL/EFL/int'l); new items auto-fetch full article text (≤ `max_bodies_per_poll` pages/poll); on-demand button as fallback |
+| **Reddit** | RSS: `reddit.com/r/FantasyPL/hot.rss` (+ `new.rss`), thread bodies `/comments/{id}.rss` · OAuth: `oauth.reddit.com` `hot.json` + `/comments/{id}.json` | None (OAuth client-credentials optional — app-only, no user login) | **Atom** (RSS) or JSON (OAuth) | 30-min cadence; pinned megathread filtered; 429s → circuit breaker stops thread fetches for that poll |
 | **YouTube** | Channel RSS `youtube.com/feeds/videos.xml?channel_id={id}`; transcripts via yt-dlp | None | Atom + VTT | 60-min cadence; ≤3 transcript fetches/poll, priority videos only (keyword match) |
-| **ESPN** | `site.api.espn.com/apis/site/v2/sports/soccer/eng.1/{scoreboard,news,standings}` | None (browser UA) | JSON | **Disabled by default** — 403s a bare client from some networks; enable in Settings → Sources (fetcher sends a browser User-Agent, verified working) |
-| **LLM** | `POST {base_url}/chat/completions` (default `http://localhost:8888/v1`) | User's API key | JSON | 60 s timeout; batches ≤ ~8k input chars; local endpoint verified key-gated |
+| **ESPN** | `site.api.espn.com/apis/site/v2/sports/soccer/eng.1/news` | None (browser UA) | JSON | **Disabled by default** — 403s a bare client from some networks; enable in Settings → Sources (fetcher sends a browser User-Agent, verified working) |
+| **LLM** | `POST {base_url}/chat/completions` (default `http://localhost:8888/v1`) | User's API key | JSON | 300 s timeout (`llm.timeout_sec`); 90 s streaming idle guard; batches ≤ ~8k input chars; local endpoint verified key-gated |
 | **Yahoo** | — | — | — | **Unsupported in v1**: the public JSON API hosts (`sportsengine.api.yahoo.com`, `sports.api.arcadia.yahoo.com`) do not resolve in DNS (verified 2026-09-20). ESPN covers live data; no Yahoo fetcher ships. |
 
 **ToS posture**: light, polite polling (intervals above; ≤20 concurrent
-requests); no scraping of paywalled/protected content; Reddit via RSS (OAuth
-optional); BBC via official RSS; YouTube via official channel RSS + public
-transcripts; **no FPL account access at all**; no writes to FPL; LLM data
-boundary = fetched public content + player names only; everything stored
-locally in SQLite; no telemetry.
+requests); no scraping of paywalled/protected content; Reddit via RSS, or
+optional OAuth client-credentials (app-only, no user login); BBC via official
+RSS; YouTube via official channel RSS + public transcripts; **no FPL account
+access at all**; no writes to FPL; LLM data boundary = fetched public content
++ player names only; everything stored locally in SQLite; no telemetry.
 
 ### LLM setup (optional but recommended)
 
@@ -185,26 +224,56 @@ OpenAI-compatible `chat/completions` endpoint:
    env wins) and only ever sent to that endpoint. Never logged.
 3. Until it's configured, the News page shows "LLM not configured —
    rule-based extraction only (confidence ≤ 0.6)" and suggestions still work.
+4. **Player list mode** — `filtered` (default) sends only the players the
+   item actually names, and skips the LLM call entirely when it names none
+   (smaller prompts, fewer tokens); `full` sends the whole player list (the
+   old behaviour — only worth it if the filter misses names your model would
+   still catch).
+5. **Empty results / JSON errors in the poll log** — completions are
+   **streamed** (bytes flow while generating, so a slow 30-minute generation
+   still finishes under the 90 s idle guard), truncated JSON is salvaged
+   (`finish_reason=length`), one bad chunk no longer destroys the item's
+   other chunks, and JSON mode is requested with a graceful fallback. If
+   extraction still logs "LLM returned empty content (finish_reason=length…)",
+   the output budget was genuinely exhausted — `llm.max_tokens` (2048)
+   matches the expected payload; raise it only if your model regularly needs
+   more. Two consecutive LLM failures trip the circuit breaker (rules-only
+   pass, noted in the item's takeaways) until the next success.
 
-## Reddit OAuth (optional upgrade)
+## Reddit OAuth (documented default)
 
-The Reddit fetcher ships in **RSS mode** (zero credentials):
-`https://www.reddit.com/r/FantasyPL/hot/.rss` etc. — and that's all you need
-for normal use. If you want the full Reddit API (higher rate limits, search,
-comments), upgrade in three steps:
+The documented default for the Reddit fetcher is **OAuth mode** (the shipped
+`config.json` uses it): higher rate limits, JSON endpoints, and no anonymous
+429 pressure. Zero-credentials **RSS mode** is the fallback (pydantic
+default; `https://www.reddit.com/r/FantasyPL/hot/.rss` etc.). Setting up
+OAuth takes three steps:
 
 1. Create a free **"script" app** at <https://www.reddit.com/prefs/apps>
    (no registration/approval needed — just a personal app entry).
 2. Copy the **client id** and **client secret** into
    **Settings → Sources → Reddit** and set **Mode: oauth** → Save.
-3. The fetcher exchanges them for a bearer token and polls
-   `oauth.reddit.com` instead of the public RSS endpoints.
+3. Done. The fetcher exchanges the credentials for a bearer token via the
+   **client-credentials flow** (app-only — no redirect URI, no user login),
+   caches it in memory (~1 h, refreshed automatically) and polls
+   `hot.json` + per-thread comments JSON via **`oauth.reddit.com`**
+   (Reddit bot-gates `www.reddit.com/*.json` with a 403 even for valid
+   tokens) instead of the RSS endpoints. The refresh result and poll log
+   report `"mode": "oauth"`; if the credentials are missing, the token
+   request fails, or the JSON fetch is rejected, it logs a warning and
+   falls back to RSS for that poll.
 
 > Rate-limit note: even in RSS mode the fetcher pulls thread bodies (top
 > comments) for up to 5 headline posts per poll, best-effort. Reddit
 > rate-limits aggressively: on a 429 the fetcher stops trying further
 > threads for that poll (items are stored with title+text only) and resumes
-> on the next cycle. OAuth mode raises the limits substantially.
+> on the next cycle. OAuth mode (~100 queries/min) removes most of the
+> anonymous 429 pressure; the circuit breaker still applies.
+>
+> **Known limitation of RSS mode** (verified 2026-10-02): `new.rss` returns
+> 429 while `hot.rss` returns 200 — the fetcher catches it and logs
+> "hot-only this poll", so in RSS mode the extra recall from polling `/new`
+> is silently lost. That is why OAuth is the documented default; the RSS
+> path is the untested fallback.
 
 ## How suggestions work
 
@@ -240,12 +309,27 @@ ep_final = w.ep · (EP_next · A(p) · (1 + S(p))) + w.form · form_adj + w.fixt
 
 **Transfer math** (2026/27 system):
 
-- Free transfers = `bank` (1–5). Each extra transfer costs **−4 points**:
-  `penalty = 4 × max(0, transfers − bank)`.
+- The solver **starts from your current squad** — a suggestion is the minimal
+  diff from your team (a fresh 15-player build only when no current lineup is
+  set), so the diff you see is what you'd actually transfer.
+- Free transfers = `bank` (1–5). **A swap (one in + one out) is ONE transfer**
+  (FPL charges per player moved). Each transfer over the bank costs **−4
+  points**: `penalty = 4 × max(0, transfers − bank)`. The penalty is subtracted
+  from the objective, so the solver only takes a swap when the projected gain
+  outweighs it (the **safe** profile prices each transfer a little extra) — and
+  the card headline shows it honestly: "adjusted → net after −N transfer
+  penalty" (a penalty now only ever comes from forced replacements of
+  unavailable players).
 - **Sell-on fee**: 0.5× the amount a player has *increased* since purchase
-  (75→78 sells at 76; 75→77 sells at 76; a fall 75→70 sells at 70).
-- 20-transfer cap per season; **wildcard / free hit neutralize penalties**
-  for the GW they cover.
+  (75→78 sells at 76; 75→77 sells at 76; a fall 75→70 sells at 70). Applies
+  when the lineup records the purchase price (`bought_cost`, kept per player —
+  editable in My Team); a player with no recorded purchase price is assumed
+  bought at the current price, so the fee is 0.
+- 20-transfer cap per GW; **wildcard / free hit cover the GW they
+  play in** — penalties waived and the cap satisfied (a free hit also
+  respects the consecutive-GW ban). Suggestions that would exceed the cap
+  without a covering chip are flagged on the card (`transfer_cap_exceeded`
+  warning) and cannot be applied (422).
 - Cost must stay ≤ £100.0m (budget 1000 in £0.1m units).
 
 **Chip advice** — per suggestion, each of the four chips gets a
@@ -278,8 +362,11 @@ the target GW — which is what powers the free-hit consecutive-ban check above.
 - Hard-unavailable players (`can_select=0`, status `u`/`s`) can never be
   selected; doubt / chance-of-playing are soft gates (via A(p)).
 
-The solver is deterministic (seed 42, multi-start hill climbing, 20 restarts,
-8 s timebox) — the same squad + data always produces the same suggestions.
+The solver is deterministic (seed 42, hill climbing, 8 s timebox) — the same
+squad + data always produces the same suggestions. With a real current squad
+and no covering chip it is a *single* local search from your squad; the
+`solver.restarts` knob only adds greedy-seed restarts when a chip covers the
+target GW or no current squad is set.
 
 > **Disclaimer**: suggestions are **projections, not guarantees** — the model
 > weights are configurable defaults, not a claim of optimality. Verify news on
@@ -313,8 +400,23 @@ transcript fetched (≤3 per poll).
 
 ## Troubleshooting
 
+- **`.\start.ps1` → "not digitally signed" even after
+  `Set-ExecutionPolicy RemoteSigned`** — this machine enforces **Software
+  Restriction Policies** (HKLM `Safer\CodeIdentifiers`), which refuses
+  unsigned scripts under every execution policy except `Bypass`. Either run
+  the wrapper **`start.cmd`** (same flags as `start.ps1`; it invokes the
+  launcher through `-ExecutionPolicy Bypass`), or one-off:
+  `powershell -ExecutionPolicy Bypass -File .\start.ps1`.
 - **LLM 401 on Test connection** — the key is wrong/empty. Fix it in
   Settings → LLM (or `.env` `LLM_API_KEY`); the endpoint is key-gated.
+- **LLM extraction stores no signals / "empty content" in the poll log** —
+  completions are streamed now, truncated JSON is salvaged, one bad chunk no
+  longer kills the item, and two consecutive failures trip the circuit
+  breaker (rules-only pass). If it still logs "empty content
+  (finish_reason=length…)", the output budget was genuinely exhausted:
+  `llm.max_tokens` (2048) matches the expected payload — raise it in
+  Settings → LLM only if your model regularly needs more; the poll log
+  records the `finish_reason`/`usage` that pin it down.
 - **yt-dlp "bot check" / no transcript** — `pip install -U yt-dlp` (the
   launcher keeps it updated only when `requirements.txt` changes), and make
   sure Node is installed (auto-caption extraction wants a JS runtime; the
@@ -336,8 +438,8 @@ transcript fetched (≤3 per poll).
 
 ## Manual test checklist
 
-Executed in a real browser at each milestone exit (final version; M3 item
-adjusted to the revised scope):
+Executed in a real browser at each milestone exit (items 9–10 are the v1.0.1
+fix checks; M3 item adjusted to the revised scope):
 
 1. **Dev mode**: `start.ps1 -Dev` → both ports up → UI loads at :5173, API
    proxied.
@@ -356,6 +458,22 @@ adjusted to the revised scope):
 8. **Test lineups + settings (M4)**: duplicate a lineup as a test → generate
    on it → apply is disabled; Settings round-trip (edit a weight → sum check,
    edit BBC interval → save) persists to `config.json` on disk.
+9. **Manual XI/bench control (v1.0.1)**: build a 15-player squad → send a MID
+   to the bench, move a bench FWD to the XI, reorder bench 2 ↔ 3 (buttons or
+   drag & drop) → Save → reload → arrangement preserved; demoting the
+   captain is blocked (tooltip; bypassing via the API → 422
+   `CAPTAIN_NOT_IN_XI`); promoting a bench GK auto-benches the current GK;
+   removing a starter auto-promotes the best same-position bench player;
+   **full-squad swap**: with 11 starters + 4 bench, "Send to bench" on a
+   starter swaps with the lowest-EP bench player (same position first) and
+   "Move to XI" on a bench player swaps with the lowest-EP non-C/VC starter
+   (tooltips name the swap partner); **Auto-pick XI** restores the EP-based
+   lineup.
+10. **Reddit OAuth (v1.0.1)**: Settings → Reddit → mode `oauth` + client
+   id/secret → Save → refresh → the result shows `"mode": "oauth"`, the log
+   has no "falling back to RSS" line, and poll_log is ok with rows > 0; the
+   News page shows fresh items with top comments. Blank the secret → Save →
+   refresh → clean RSS fallback (warning logged, no crash).
 
 ## Milestones & status
 
@@ -365,6 +483,18 @@ adjusted to the revised scope):
 | **M2 — News layer** (2026-09-20, `f82e1c3`) | BBC/ESPN/Reddit/YouTube fetchers + raw_items + LLM extractor + rule fallback + signals page + optimizer integration (A(p) + S(p)) | ✅ done |
 | **M3 — Real-time → revised** (2026-09-20, `098033e`) | Original scope (live pollers + SSE + live dashboard) **dropped per project decision**; replaced by a **full news refresh on every start** (background task after the synchronous FPL bootstrap) + completion banner. The season state still reports `live_mode` / `live_window` from the fixtures. | ✅ done (revised scope) |
 | **M4 — Polish** (2026-09-20, `d5d8b0d` → `5074aef` + T4.8–T4.10) | Solver convergence, chip advice v2, test lineups, full Settings page, weight sliders, packaging (launchers + fresh-clone smoke), final README, v1.0.0 tag | ✅ done |
+| **v1.0.1 — bug fixes** (post-v1.0.0) | Manual XI/bench control in My Team (Send to bench / Move to XI / drag & drop / Auto-pick XI; `FIX.MD` bug 1) + Reddit OAuth client-credentials implementation (token cache, `hot.json` + comments JSON, RSS fallback; `FIX.MD` bug 2) + entry rank card (T4.4, carried over from the M4 working tree — now documented) | ✅ done |
+| **v1.0.2 — bug fixes** (2026-09-21) | Solver works from your current squad with penalty-aware objectives + the 20-transfer cap (card warning when a diff would exceed it without a covering chip — `FIX.MD` Task 1); LLM extraction robustness: filtered player list, configurable `max_tokens`, empty-content diagnostics in the poll log (Task 2); BBC full-article auto-fetch for new PL-relevant items, capped per poll (Task 3); Reddit data-dump title filter + `config.json` untracked (gitignored) with `config.example.json` (Task 4) | ✅ done |
+| **v1.0.3 — FIX.MD overhaul** (2026-09-21) | Transfer math rebuilt (a swap = ONE transfer; hard free-bank cap with forced-replacement allowance; honest penalty on the card; GW-scoped chip-ban checks; apply decrements played chips — Wildcard can't be re-claimed); LLM extraction rebuilt (streaming + sane budgets — `timeout_sec` 300/`max_tokens` 2048, **your `config.json` was updated** — per-chunk isolation, JSON salvage, JSON-mode fallback, circuit breaker, full-list fallback + nickname aliases, Reddit `/new` + flair, YouTube transcript backlog retry, BBC PL feed); solver/scoring hardening (sell-on-fee-aware affordability + honest "Budget after", 25/75 chance buckets, per-profile dedupe caps, dead code removed, deterministic move budget) | ✅ done |
+| **rev 2 — full-project audit** (2026-10-02) | `FIX.MD` rewritten as a verified audit; **23 findings (A1–A23) fixed**: chip-name normalisation at ingest (`3xc` → `triple_captain` — Triple Captain was never recommendable), season-rollover FK ordering (the first bootstrap of a new season aborted the whole refresh), one shared transliterating name normaliser (83 of 667 players never resolved from their own name), four API bugs (`/signals` 500, `has_signal` always empty, `target_gw` ignored, chip counts double-decrementing), LLM settings hardening (key redacted on read, Test Connection tests the draft), `bought_cost` preservation, test-lineup `kind` preservation, `exact_ilp` removed | ✅ done |
+| **rev 3 — post-audit close-out** (2026-10-03) | Follow-up audit of rev 2: **4 warnings + 10 nits fixed, 1 coverage gap closed.** LLM prompt-cap truncation made real (the production player list was missing `selected_by_percent`, so "keep the most-owned" was a no-op); name-scan precision recalibrated (a proper noun is required; the club anchor is now only needed when 2+ players share the word — the old AND-rule dropped "Pope out for a month"); applying a suggestion from a **test lineup** (or an orphaned one) now refuses instead of writing team-level chip plays; legacy diff rows no longer render "1 / undefined"; the `exact_ilp` checkbox and `restarts` knob are honestly labelled. See `FIX.MD` §0.0 | ✅ done |
+
+> **Version naming.** The personal milestone history above uses `v1.x` because these were local
+> iterations. The **first public release of this repository is tagged `v0.1`** — the app is a
+> personal-use tool whose rules/weights are configurable defaults, not a claim of maturity, so the
+> public tag starts low. The version string shown in **Settings → About** is set in
+> `frontend/src/pages/Settings.tsx` (search for `FPL Tracker v`) and the API title/version in
+> `backend/app/main.py`; if you want them to read `0.1.0`, change those two places and nothing else.
 
 Note on "simulated vs real": all acceptance testing used **live** FPL/news
 data (the only simulated parts are the pytest fixtures for the solver and
@@ -393,8 +523,9 @@ dry pass was executed on 2026-09-20 (see `ACCEPTANCE.md`); every item passed.
    abbreviations) auto-rebuilds at first run; watch
    Settings → Data → recent poll errors for "team map mismatch" in GW1.
 6. **Player universe**: first bootstrap of the season → sanity: all 4
-   positions present, prices sensible, `players.season` bumped, old-season
-   signals wiped (season-rollover logic, `PLAN.MD` §7).
+   positions present, prices sensible, old-season players/signals wiped
+   (season-rollover logic re-syncs the `players` table — there is no
+   `players.season` column, `PLAN.MD` §7).
 7. **LLM model**: if your local model changed → update `.env`
    (`LLM_MODEL`) or Settings → LLM.
 8. **yt-dlp**: `pip install -U yt-dlp` (YouTube extraction is a moving
@@ -419,11 +550,14 @@ backend/
                       rule_extractor.py (keyword backstop) · llm_extractor.py ·
                       store.py (TTL) · pipeline.py (LLM→rules orchestration)
     optimizer/        rules.py · scoring.py · solver.py · transfers.py
-    api/              meta · players · lineups · suggestions · settings · news
-  scripts/dev_check.py
-  tests/              139 tests (rules, EP, transfers, solver, names, API,
+    api/              meta (season + settings + test-llm) · entry · players ·
+                      lineups · suggestions · news
+  scripts/dev_check.py · probe_reddit_token.py (Reddit OAuth diagnostics) ·
+          check_name_resolution.py (name-index self-consistency probe)
+  tests/              280 tests (rules, EP, transfers, solver, names, API,
                       signals rule/llm/ingest, fetchers, news API, startup,
-                      chip advice, chip-play endpoints)
+                      season rollover, chip advice, chip-play/apply endpoints,
+                      entry API)
 frontend/
   src/
     pages/            Dashboard · MyTeam · Suggestions · News · Settings
@@ -439,8 +573,10 @@ data/                 fpl.db (gitignored)
 
 ```powershell
 cd backend
-..\.venv\Scripts\python -m pytest tests -q     # 139 tests, no network needed
+..\.venv\Scripts\python -m pytest tests -q     # 280 tests, no network needed
+..\.venv\Scripts\python scripts\check_name_resolution.py  # 667 players: 0 wrong, 0 missing
 ..\.venv\Scripts\python scripts\dev_check.py   # live end-to-end smoke check
+..\.venv\Scripts\python scripts\probe_reddit_token.py  # Reddit OAuth: token + host check
 ```
 
 Frontend: `cd frontend && npx tsc --noEmit && npx vite build`.
@@ -452,10 +588,36 @@ suggestions, SQLite for zero-ops local storage.
 
 ## Notes & caveats
 
-- LLM transcripts are **auto-captions only** (yt-dlp `--write-auto-sub`),
-  budgeted to 3 videos per poll, and only used by the LLM path — the rule
-  path reads YouTube title+description only (caption noise would confuse it).
+- LLM transcripts come from yt-dlp, which tries `--write-auto-sub` first and
+  falls back to `--write-sub`, preferring human captions
+  (`--sub-langs en,en-orig`); budgeted to 3 videos per poll, and only used by
+  the LLM path — the rule path reads YouTube title+description only (caption
+  noise would confuse it).
 - When a signal hits a player in the suggested XI, the rationale notes it
   ("Signal applied: …").
+- **Name matching is deliberately conservative on ordinary words.** A player
+  whose name is a common English word (`White`, `Pope`, `Barnes`, `Wood`) is
+  matched only when it is used as a **proper noun** (`Pope out for a month`
+  resolves; `the white shirt` does not), and when 2+ players share the word a
+  club or "Premier League" mention in the same sentence is also required
+  (`Wood is a doubt for Nottingham Forest` picks the Forest one; a bare `Wood`
+  picks nobody). The 26-word list and the rule live in
+  `backend/app/signals/names.py`; `scripts/check_name_resolution.py` re-checks
+  that every player still resolves from their own name (`667 players: 0 wrong,
+  0 missing`). Known residual: a **first-name** mention that the FPL data does
+  not store verbatim ("Ben White" where `first_name` is `Benjamin`) is a miss
+  until an alias is added to `ALIASES` — check candidates with
+  `scripts/validate_aliases.py` first.
+- The `bought_cost` field is only meaningful if you enter or keep your real
+  purchase prices: it survives a save (it is no longer overwritten with the
+  current price), and the My Team squad list lets you edit it. Leave it at the
+  current price and the sell-on fee stays 0, which makes `Budget after`
+  optimistic for players who have risen.
+- Settings → Sources **interval** changes need an app restart (the scheduler
+  reads the config once at boot, `scheduler.py`); optimizer **weights** are
+  read per-generate and apply immediately. The Settings page does not say
+  which is which.
 - The app stores no credentials except what you type into Settings (LLM key,
   optional Reddit OAuth) — everything stays in `config.json` / `.env` locally.
+  `GET /api/settings` never echoes the key (it returns `""` plus a `key_set`
+  flag), and a blank key field on save means "keep the stored one".

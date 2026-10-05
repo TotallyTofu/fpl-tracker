@@ -51,7 +51,7 @@
     "model": "",
     "timeout_sec": 60,
     "batch_chars": 8000,
-    "max_tokens": 16000,
+    "max_tokens": 8192,
     "player_list_mode": "filtered"
   },
   "optimizer": {
@@ -65,7 +65,9 @@
       "doubt": 0.7,
       "chance_null": 1.0,
       "chance_100": 1.0,
+      "chance_75": 0.85,
       "chance_50": 0.65,
+      "chance_25": 0.35,
       "chance_0": 0.0
     },
     "signal": {
@@ -79,8 +81,7 @@
     "solver": {
       "restarts": 20,
       "timebox_sec": 8,
-      "seed": 42,
-      "exact_ilp": false
+      "seed": 42
     }
   },
   "group": {

@@ -1,4 +1,6 @@
 """EP model tests: deterministic, config-driven (PLAN-2 T1.16)."""
+import pytest
+
 from app.optimizer.scoring import (
     availability_multiplier,
     ep_final,
@@ -41,6 +43,33 @@ def test_availability_active_maps():
     assert availability_multiplier(p(chance_of_playing_next_round=50), cfg=cfg) == 0.5
     assert availability_multiplier(p(chance_of_playing_next_round=0), cfg=cfg) == 0.0
     assert availability_multiplier(p(chance_of_playing_next_round=None), cfg=cfg) == 0.9
+
+
+@pytest.mark.parametrize("chance,expected", [
+    (None, 0.9),   # chance_null
+    (100, 1.0),    # chance_100
+    (75, 0.85),    # FIX T2: ≥75 bucket (getattr fallback default)
+    (50, 0.5),     # chance_50
+    (25, 0.35),    # FIX T2: ≥25 bucket (getattr fallback default)
+    (10, 0.0),     # FIX T2: 0 < chance < 25 → effectively out
+    (0, 0.0),      # chance_0
+])
+def test_availability_chance_buckets(chance, expected):
+    """FIX T2: FPL also emits 25/75 and intermediate chance values — the old
+    exact-match chain (==100/==50/==0) priced them as fully available."""
+    cfg = _cfg(active=True)
+    assert availability_multiplier(p(chance_of_playing_next_round=chance), cfg=cfg) == expected
+
+
+def test_availability_chance_buckets_from_config():
+    """FIX T2: the 75/25 buckets come from config keys when present."""
+    cfg = _cfg(active=True)
+    cfg.optimizer.availability.chance_75 = 0.8
+    cfg.optimizer.availability.chance_25 = 0.3
+    assert availability_multiplier(p(chance_of_playing_next_round=75), cfg=cfg) == 0.8
+    assert availability_multiplier(p(chance_of_playing_next_round=25), cfg=cfg) == 0.3
+    assert availability_multiplier(p(chance_of_playing_next_round=60), cfg=cfg) == 0.5  # still the 50 bucket
+    assert availability_multiplier(p(chance_of_playing_next_round=30), cfg=cfg) == 0.3
 
 
 def test_signal_adjustment_stacking_and_caps():

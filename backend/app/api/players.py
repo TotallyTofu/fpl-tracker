@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query
 
-from ..db import query
+from ..db import now_utc, query
 
 router = APIRouter()
 
@@ -38,7 +38,8 @@ async def list_players(
         params.append(max_cost)
     if has_signal:
         sql += (" AND EXISTS (SELECT 1 FROM signals s WHERE s.player_id = p.id "
-                "AND s.expires_at IS NULL)")
+                "AND s.expires_at > ?)")
+        params.append(now_utc())
     sql += " ORDER BY p.ep_next DESC LIMIT ?"
     params.append(limit)
     rows = query(sql, params)

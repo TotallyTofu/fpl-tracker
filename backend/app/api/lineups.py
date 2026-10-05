@@ -14,12 +14,30 @@ from ..signals.names import match_names
 router = APIRouter()
 
 
+def _decrement_chips(lineup_id: int, chips_used: list[str]) -> None:
+    """FIX T3: subtract played chips from the lineup's in-hand sets.
+
+    Silently skips chips the lineup does not hold (never below 0). MyTeam's
+    steppers stay user-editable; this keeps them honest instead of silently
+    wrong after a chip is played.
+    """
+    row = query_one("SELECT chips FROM lineups WHERE id = ?", (lineup_id,))
+    if not row:
+        return
+    chips = json.loads(row["chips"])
+    for c in chips_used:
+        if chips.get(c, 0) > 0:
+            chips[c] -= 1
+    execute("UPDATE lineups SET chips = ? WHERE id = ?", (json.dumps(chips), lineup_id))
+
+
 class LineupPlayerIn(BaseModel):
     player_id: int
     role: Literal["starter", "bench"]
     bench_order: int | None = Field(None, ge=1, le=4)
     is_captain: bool = False
     is_vice_captain: bool = False
+    bought_cost: int | None = Field(None, ge=0)  # A15: real purchase price (None = keep/derive)
 
 
 class LineupIn(BaseModel):
@@ -28,7 +46,7 @@ class LineupIn(BaseModel):
     chips: dict[str, int] = Field(
         default_factory=lambda: {"wildcard": 2, "freehit": 2, "bboost": 2, "triple_captain": 2}
     )
-    kind: Literal["current", "test"] = "current"  # T4.3: test lineups are sandbox copies
+    kind: Literal["current", "test"] | None = None  # A16: None on update = keep the stored kind
     players: list[LineupPlayerIn]
 
 
@@ -101,11 +119,21 @@ async def list_chip_plays(gw: int | None = None) -> dict:
 
 @router.post("/lineups/chip-play", status_code=201)
 async def log_chip_play(body: ChipPlayIn) -> dict:
-    execute(
-        "INSERT OR IGNORE INTO chip_plays_log (lineup_id, gw, chip, played_at) VALUES (NULL,?,?,?)",
-        (body.gw, body.chip, now_utc()),
-    )
-    return {"logged": {"gw": body.gw, "chip": body.chip}}
+    """Record that a chip was played in a GW (drives the Free-Hit ban).
+
+    Deliberately does NOT decrement lineups.chips: the checkbox is a toggle, so a
+    decrement here double-counts (see FIX.MD A14). Edit the in-hand counts with
+    the MetaPanel steppers; `apply_suggestion` is the only automatic decrement,
+    and it is guarded by suggestions.applied_at.
+    """
+    existed = query_one("SELECT 1 AS x FROM chip_plays_log WHERE gw = ? AND chip = ?",
+                        (body.gw, body.chip))
+    if not existed:
+        execute(
+            "INSERT INTO chip_plays_log (lineup_id, gw, chip, played_at) VALUES (NULL,?,?,?)",
+            (body.gw, body.chip, now_utc()),
+        )
+    return {"logged": {"gw": body.gw, "chip": body.chip}, "already": bool(existed)}
 
 
 @router.delete("/lineups/chip-play")
@@ -124,7 +152,7 @@ async def create_lineup(body: LineupIn) -> dict:
     lid = execute(
         "INSERT INTO lineups (name, transfer_bank, chips, is_current, kind, created_at, updated_at) "
         "VALUES (?,?,?,?,?,?,?)",
-        (body.name, body.transfer_bank, json.dumps(body.chips), 0, body.kind, ts, ts),
+        (body.name, body.transfer_bank, json.dumps(body.chips), 0, body.kind or "current", ts, ts),
     )
     _save_players(lid, body)
     out = _load_lineup(lid)
@@ -144,15 +172,15 @@ async def get_lineup(lid: int) -> dict:
 
 @router.put("/lineups/{lid}")
 async def update_lineup(lid: int, body: LineupIn) -> dict:
-    if not query_one("SELECT id FROM lineups WHERE id = ?", (lid,)):
+    row = query_one("SELECT kind FROM lineups WHERE id = ?", (lid,))
+    if not row:
         raise HTTPException(404, "lineup not found")
     _validate_in(body)
     execute(
         "UPDATE lineups SET name = ?, transfer_bank = ?, chips = ?, kind = ?, updated_at = ? WHERE id = ?",
-        (body.name, body.transfer_bank, json.dumps(body.chips), body.kind, now_utc(), lid),
+        (body.name, body.transfer_bank, json.dumps(body.chips), body.kind or row["kind"], now_utc(), lid),
     )
-    execute("DELETE FROM lineup_players WHERE lineup_id = ?", (lid,))
-    _save_players(lid, body)
+    _save_players(lid, body)  # A15: reads the old rows before deleting them
     return _load_lineup(lid)
 
 
@@ -249,12 +277,21 @@ def _validate_in(body: LineupIn) -> None:
 
 
 def _save_players(lid: int, body: LineupIn) -> None:
+    """Persist squad rows. bought_cost (A15): an explicit value wins, else the
+    previously stored value survives the DELETE-and-reinsert, else the current
+    price is the snapshot for a brand-new row."""
     costs = {r["id"]: r["now_cost"] for r in query("SELECT id, now_cost FROM players")}
+    prev = {r["player_id"]: r["bought_cost"] for r in query(
+        "SELECT player_id, bought_cost FROM lineup_players WHERE lineup_id = ?", (lid,))}
+    execute("DELETE FROM lineup_players WHERE lineup_id = ?", (lid,))  # after the read above
     rows = []
     for p in body.players:
+        paid = p.bought_cost if p.bought_cost is not None else prev.get(p.player_id)
+        if paid is None:
+            paid = costs.get(p.player_id)
         rows.append(
             (lid, p.player_id, p.role, p.bench_order, 1 if p.is_captain else 0,
-             1 if p.is_vice_captain else 0, costs.get(p.player_id))
+             1 if p.is_vice_captain else 0, paid)
         )
     from ..db import execute_many
     execute_many(

@@ -62,6 +62,30 @@ class HttpClient:
                     await asyncio.sleep(BACKOFF * (attempt + 1))
         raise last_exc  # type: ignore[misc]
 
+    async def post_form(self, url: str, *, data: dict | None = None,
+                        headers: dict | None = None, timeout: float | None = None) -> tuple[int, httpx.Response]:
+        """application/x-www-form-urlencoded POST (e.g. Reddit's token endpoint).
+
+        Returns ``(status_code, response)`` — mirrors post_json's tuple style;
+        call sites must check the status explicitly.
+        """
+        c = await self.client()
+        last_exc: Exception | None = None
+        for attempt in range(RETRIES + 1):
+            try:
+                async with self._sem:
+                    r = await c.post(url, data=data, headers=headers,
+                                     timeout=timeout or TIMEOUT)
+                if r.status_code >= 500:
+                    raise httpx.HTTPStatusError(f"5xx {r.status_code}", request=r.request,
+                                                response=r)
+                return r.status_code, r
+            except (httpx.TimeoutException, httpx.HTTPStatusError) as e:
+                last_exc = e
+                if attempt < RETRIES:
+                    await asyncio.sleep(BACKOFF * (attempt + 1))
+        raise last_exc  # type: ignore[misc]
+
     async def _get(self, url: str, *, params: dict | None,
                    parse: Callable[[bytes], Any], timeout: float | None,
                    headers: dict | None = None) -> Any:

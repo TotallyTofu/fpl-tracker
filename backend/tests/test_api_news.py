@@ -64,6 +64,35 @@ def test_signals_filters(client):
     assert client.get("/api/signals", params={"player_id": 999}).json()["count"] == 0
 
 
+def test_signals_inactive_team_filter(client):
+    """A11: active=false + team filter used to build "WHERE  AND" → HTTP 500."""
+    dbmod.execute("UPDATE teams SET short_name = 'ALP' WHERE id = 1")
+    dbmod.execute("UPDATE teams SET short_name = 'BET' WHERE id = 2")
+    store.save_signals([
+        {"player_id": 1, "category": "injury", "sentiment": "negative",
+         "confidence": 0.5, "summary": "Goal One ruled out.", "source": "bbc:x1",
+         "url": None, "published_at": NOW, "raw_item_id": None, "model": "rules"},
+        {"player_id": 5, "category": "selection", "sentiment": "negative",
+         "confidence": 0.4, "summary": "Def B One a doubt.", "source": "espn:9",
+         "url": None, "published_at": NOW, "raw_item_id": None, "model": "rules"},
+    ])
+    r = client.get("/api/signals", params={"active": False, "team": "ALP"})
+    assert r.status_code == 200
+    d = r.json()
+    assert d["count"] == 1
+    assert d["signals"][0]["player_id"] == 1
+    # team + player_id + category combined
+    r = client.get("/api/signals", params={"active": False, "team": "ALP",
+                                           "player_id": 1, "category": "injury"})
+    assert r.status_code == 200
+    assert r.json()["count"] == 1
+    # team + non-matching category → empty, still 200
+    r = client.get("/api/signals", params={"active": False, "team": "ALP",
+                                           "category": "selection"})
+    assert r.status_code == 200
+    assert r.json()["count"] == 0
+
+
 def test_items_endpoint(client):
     _seed(client)
     r = client.get("/api/items")

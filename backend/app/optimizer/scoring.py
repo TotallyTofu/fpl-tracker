@@ -21,13 +21,20 @@ def availability_multiplier(p: dict, cfg) -> float:
         return 1.0
     a = av.doubt if p.get("status") == "d" else 1.0
     chance = p.get("chance_of_playing_next_round")
+    # FIX T2: threshold buckets, not exact matches — FPL also emits 25/75 and
+    # intermediate values, which the old exact-match chain priced as 1.0
+    # (fully available). getattr fallbacks keep hand-built test cfgs working.
     if chance is None:
         a *= av.chance_null
     elif chance == 100:
         a *= av.chance_100
-    elif chance == 50:
+    elif chance >= 75:
+        a *= getattr(av, "chance_75", 0.85)
+    elif chance >= 50:
         a *= av.chance_50
-    elif chance == 0:
+    elif chance >= 25:
+        a *= getattr(av, "chance_25", 0.35)
+    else:                      # 0 < chance < 25 — effectively out
         a *= av.chance_0
     return a
 
@@ -82,6 +89,9 @@ def score_lineup(squad: list[dict], xi: list[dict], captain_id: int, vc_id: int,
     if cap is not None:
         adjusted += ep_final(cap, signals_by_player.get(cap["id"], []), cfg,
                              diff_map.get(cap["id"]))
+    # with_captain is identical to adjusted (the captain is already counted in
+    # `adjusted`; the VC has no multiplier since 2026/27). Kept for API
+    # compatibility — the frontend does not read it (FIX T6).
     return {
         "baseline": round(baseline, 1),
         "adjusted": round(adjusted, 1),

@@ -67,7 +67,6 @@ export default function Suggestions() {
   };
 
   const gwOptions: number[] = [];
-  if (season?.current_gw) gwOptions.push(season.current_gw);
   if (season?.next_gw) gwOptions.push(season.next_gw);
   if (season?.next_gw && season.events_total)
     gwOptions.push(Math.min(season.next_gw + 1, season.events_total));

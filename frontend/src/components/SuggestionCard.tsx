@@ -3,10 +3,10 @@ import { api } from "../api";
 import ApplyChecklist from "./ApplyChecklist";
 import DiffTable from "./DiffTable";
 import PitchView from "./PitchView";
-import type { LineupPlayer, Suggestion } from "../types";
+import type { SquadPlayer, Suggestion } from "../types";
 import { fmtTime } from "../types";
 
-function DiffEdge({ squad }: { squad: LineupPlayer[] }) {
+function DiffEdge({ squad }: { squad: SquadPlayer[] }) {
   const starters = squad.filter((p) => p.role === "starter");
   const low = starters.filter((p) => (p.selected_by_percent ?? 100) < 10);
   if (starters.length === 0) return null;
@@ -18,9 +18,9 @@ function DiffEdge({ squad }: { squad: LineupPlayer[] }) {
 }
 
 const DESC: Record<string, string> = {
-  max_ep: "Highest projected points for the target GW",
-  differential: "Same idea, but favours low-ownership picks (λ bonus)",
-  safe: "Weighted by reliability — avoids doubt/50% risk",
+  max_ep: "Highest projected points for the target GW — stays within your free-transfer bank",
+  differential: "Same idea, but favours low-ownership picks (λ bonus) — stays within your free-transfer bank",
+  safe: "Weighted by reliability — avoids doubt/50% risk; strictly within your free-transfer bank",
 };
 
 const CHIP_LABELS: Record<string, string> = {
@@ -66,7 +66,13 @@ export default function SuggestionCard({
         <span className="spacer" />
         <span className="big-num">{proj.adjusted.toFixed(1)}</span>
         <span className="sub">
-          baseline {proj.baseline.toFixed(1)} → adjusted {proj.adjusted.toFixed(1)} (captain ×2 incl.)
+          FPL baseline {proj.baseline.toFixed(1)} (raw EP, no signals/chips) → adjusted{" "}
+          {proj.adjusted.toFixed(1)} (incl. availability, signals, captain ×2)
+          {proj.penalty_points ? (
+            <>
+              {" "}→ net {proj.net_after_transfers} after −{proj.penalty_points} transfer penalty
+            </>
+          ) : null}
         </span>
       </div>
       <div className="small muted" style={{ marginBottom: 10 }}>

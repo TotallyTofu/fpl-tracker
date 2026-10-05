@@ -14,7 +14,7 @@ import json
 import time
 from datetime import datetime, timezone
 
-from ..db import execute, now_utc, query
+from ..db import execute, now_utc, query, query_one
 
 _BODY_LIMIT = 200_000  # transcripts ~75 KB are fine; hard cap at storage
 
@@ -107,11 +107,24 @@ def set_takeaways(item_id: int, takeaways: list[str]) -> None:
 
 
 def pending_items(limit: int = 50) -> list[dict]:
-    """Unprocessed items, oldest first (extraction queue)."""
+    """Unprocessed items in extraction order (FIX N10).
+
+    Short items first — YouTube video rows (transcript backlogs) can never
+    starve the time-sensitive BBC/Reddit headlines, then oldest first.
+    """
     return query(
-        "SELECT * FROM raw_items WHERE processed = 0 ORDER BY retrieved_at ASC, id ASC LIMIT ?",
+        """SELECT * FROM raw_items WHERE processed = 0
+           ORDER BY (source = 'youtube') ASC, retrieved_at ASC, id ASC LIMIT ?""",
         (limit,),
     )
+
+
+def bump_extract_attempts(item_id: int) -> int:
+    """FIX N10: count one failed extraction attempt; returns the new total."""
+    execute("UPDATE raw_items SET extract_attempts = extract_attempts + 1 WHERE id = ?",
+            (item_id,))
+    row = query_one("SELECT extract_attempts FROM raw_items WHERE id = ?", (item_id,))
+    return int(row["extract_attempts"]) if row else 0
 
 
 def mark_processed(item_id: int, takeaways: list[str] | None = None) -> None:

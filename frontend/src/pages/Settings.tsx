@@ -17,7 +17,7 @@ import type {
   YouTubeSource,
 } from "../types";
 
-type Draft = Omit<SettingsResponse, "llm_status" | "pulp_available">;
+type Draft = Omit<SettingsResponse, "llm_status">;
 
 function fmtBytes(n: number) {
   if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
@@ -28,7 +28,6 @@ function fmtBytes(n: number) {
 export default function Settings() {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [status, setStatus] = useState<SettingsResponse["llm_status"] | null>(null);
-  const [pulpAvailable, setPulpAvailable] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
@@ -42,10 +41,9 @@ export default function Settings() {
     api
       .getSettings()
       .then((r) => {
-        const { llm_status, pulp_available, ...rest } = r;
+        const { llm_status, ...rest } = r;
         setDraft(rest);
         setStatus(llm_status);
-        setPulpAvailable(!!pulp_available);
       })
       .catch(() => {});
     api.getDbStats().then(setStats).catch(() => {});
@@ -96,10 +94,9 @@ export default function Settings() {
     setSaveMsg(null);
     try {
       const updated = await api.putSettings(draft);
-      const { llm_status, pulp_available, ...rest } = updated;
+      const { llm_status, ...rest } = updated;
       setDraft(rest);
       setStatus(llm_status);
-      setPulpAvailable(!!pulp_available);
       setDirty(false);
       setSaveMsg("Saved — config.json updated on disk.");
     } catch (e) {
@@ -110,10 +107,17 @@ export default function Settings() {
   };
 
   const testLlm = async () => {
+    if (!draft) return;
     setTesting(true);
     setTestResult(null);
     try {
-      const r = await api.testLlm();
+      // send the edited draft, not just what's on disk (FIX.MD A4); the empty
+      // (redacted) key field falls back to the saved key server-side (A3)
+      const r = await api.testLlm({
+        base_url: draft.llm.base_url,
+        api_key: draft.llm.api_key,
+        model: draft.llm.model,
+      });
       setTestResult(r.ok ? `OK — model ${r.model} replied: "${r.reply}"` : `Failed: ${r.error}`);
     } catch (e) {
       setTestResult(String(e));
@@ -156,6 +160,8 @@ export default function Settings() {
 
   const s = draft.sources;
   const o = draft.optimizer;
+  const weightsSum = Math.round((o.weights.ep + o.weights.form + o.weights.fixture) * 100) / 100;
+  const weightsOk = Math.abs(weightsSum - 1) <= 0.01;
 
   return (
     <div>
@@ -163,7 +169,13 @@ export default function Settings() {
         <h1 style={{ margin: 0 }}>Settings</h1>
         <span className="spacer" />
         {dirty && <span className="small muted">unsaved changes</span>}
-        <button onClick={save} disabled={saving || !dirty}>
+        {!weightsOk && (
+          <span className="err">
+            Saving is blocked: optimizer weights must sum to 1.00 (got {weightsSum.toFixed(2)}) — fix them or use
+            Auto-normalize first
+          </span>
+        )}
+        <button onClick={save} disabled={saving || !dirty || !weightsOk}>
           {saving ? "Saving…" : "Save all changes"}
         </button>
       </div>
@@ -208,7 +220,7 @@ export default function Settings() {
               type="password"
               value={draft.llm.api_key}
               onChange={(e) => upLlm({ api_key: e.target.value })}
-              placeholder="your key"
+              placeholder="leave blank to keep the saved key"
             />
           </div>
           <div>
@@ -238,6 +250,28 @@ export default function Settings() {
               onChange={(e) => upLlm({ batch_chars: Number(e.target.value) })}
             />
           </div>
+          <div>
+            <label>Max tokens</label>
+            <input
+              type="number"
+              min={500}
+              step={500}
+              value={draft.llm.max_tokens}
+              onChange={(e) => upLlm({ max_tokens: Number(e.target.value) })}
+            />
+          </div>
+          <div>
+            <label>Player list mode</label>
+            <select value={draft.llm.player_list_mode} onChange={(e) => upLlm({ player_list_mode: e.target.value })}>
+              <option value="filtered">filtered (only players named in the item)</option>
+              <option value="full">full (entire squad list)</option>
+            </select>
+          </div>
+        </div>
+        <div className="small muted" style={{ marginTop: 6 }}>
+          Max tokens is the per-request output budget — thinking models spend it on reasoning before answering, so
+          raise it if extraction logs “empty content”. Filtered mode skips the LLM call entirely when the item names
+          no player.
         </div>
         <div className="row" style={{ marginTop: 10 }}>
           <button className="ghost" onClick={testLlm} disabled={testing}>
@@ -308,6 +342,28 @@ export default function Settings() {
               onChange={(e) => upBbc({ interval_min: Number(e.target.value) })}
             />
           </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={s.bbc.fetch_bodies}
+              onChange={(e) => upBbc({ fetch_bodies: e.target.checked })}
+            />{" "}
+            auto-fetch full article bodies
+          </label>
+          <label>
+            max bodies/poll{" "}
+            <input
+              type="number"
+              min={0}
+              style={{ width: 60 }}
+              value={s.bbc.max_bodies_per_poll}
+              onChange={(e) => upBbc({ max_bodies_per_poll: Number(e.target.value) })}
+            />
+          </label>
+        </div>
+        <div className="small muted" style={{ marginTop: 6 }}>
+          With auto-fetch on, new PL-relevant items have their full article text fetched (capped per poll for
+          politeness) so the extractors see the whole story, not just the RSS blurb.
         </div>
 
         <h3>Reddit r/FantasyPL (RSS)</h3>
@@ -354,8 +410,9 @@ export default function Settings() {
           </div>
         </div>
         <div className="small muted" style={{ marginTop: 6 }}>
-          OAuth mode is a documented future extension — RSS is used until then (create a free “script” app at
-          reddit.com/prefs/apps if you want to try it later).
+          OAuth mode uses the client-credentials flow with a free “script” app (reddit.com/prefs/apps). No
+          redirect URI or user login needed; the token is cached in memory (~1 h) and refreshed automatically.
+          Falls back to RSS when credentials are missing or the token request fails.
         </div>
 
         <h3>YouTube (channel RSS + transcripts)</h3>
@@ -581,8 +638,10 @@ export default function Settings() {
               onChange={(e) => upOptTop({ differential_ep_floor: Number(e.target.value) })}
             />
           </label>
-          <label>
-            restarts{" "}
+          <label
+            title="Only used when a chip covers the target GW or no current squad is set — with a real squad and no chip, the solver runs a single local search from your squad."
+          >
+            restarts (chip/no-squad only){" "}
             <input
               type="number"
               min={1}
@@ -611,21 +670,7 @@ export default function Settings() {
               onChange={(e) => upSolver({ seed: Number(e.target.value) })}
             />
           </label>
-          <label style={{ opacity: pulpAvailable ? 1 : 0.5 }}>
-            <input
-              type="checkbox"
-              checked={o.solver.exact_ilp}
-              disabled={!pulpAvailable}
-              onChange={(e) => upSolver({ exact_ilp: e.target.checked })}
-            />{" "}
-            exact ILP (PuLP)
-          </label>
-        </div>
-        {!pulpAvailable && (
-          <div className="small muted" style={{ marginTop: 6 }}>
-            Exact ILP is greyed out until PuLP is installed: <span className="mono">pip install pulp</span>
           </div>
-        )}
       </div>
 
       {/* ---------------------------------------------------------- Group */}
@@ -644,8 +689,9 @@ export default function Settings() {
           </label>
         </div>
         <div className="small muted" style={{ marginTop: 6 }}>
-          The group-rank card is optional and was skipped in v1 (no entry ID provided). If you set an ID here, a
-          future update can surface your league rank on the Dashboard.
+          Your public FPL entry ID — the number in your FPL team URL
+          (fantasy.premierleague.com/a/team/{"{id}"}). When set, the Dashboard shows your overall rank +
+          per-league positions (fetched every 15 min, public endpoint, no login).
         </div>
       </div>
 
@@ -706,7 +752,7 @@ export default function Settings() {
       <div className="panel">
         <h2 style={{ marginTop: 0 }}>About</h2>
         <div className="small">
-          <b>FPL Tracker v1.0.0</b> — local-first FPL team optimizer. No FPL login by design: data comes from public
+          <b>FPL Tracker v1.0.2</b> — local-first FPL team optimizer. No FPL login by design: data comes from public
           endpoints only, and your API key (if any) is stored in this machine's config.json / .env and sent only to
           your LLM endpoint.
         </div>
@@ -728,13 +774,13 @@ export default function Settings() {
             </tr>
             <tr>
               <td>BBC Sport</td>
-              <td>RSS</td>
+              <td>RSS + article pages</td>
               <td>30 min</td>
-              <td>light polling, no scraping</td>
+              <td>light polling, capped body auto-fetch</td>
             </tr>
             <tr>
               <td>Reddit r/FantasyPL</td>
-              <td>RSS</td>
+              <td>RSS or OAuth (JSON)</td>
               <td>30 min</td>
               <td>rate-limit aware (circuit breaker)</td>
             </tr>

@@ -104,7 +104,9 @@ async def run_full_refresh() -> dict:
     try:
         from .signals.pipeline import process_pending_items
 
-        state["signals_stored"] = await process_pending_items(limit=50)
+        # FIX N8: time-budgeted like the scheduled pass.
+        state["signals_stored"] = await process_pending_items(
+            limit=50, timebox_sec=cfg.llm.extract_timebox_sec)
     except Exception:
         log.exception("startup signal pipeline failed (non-fatal)")
 

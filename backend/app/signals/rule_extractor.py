@@ -48,6 +48,12 @@ KEYWORDS: dict[str, list[tuple[str, str, float]]] = {
 _COMPILED = {cat: [(re.compile(p, re.IGNORECASE), s, c) for p, s, c in pats]
              for cat, pats in KEYWORDS.items()}
 
+# Data-dump titles (Reddit stats tables) are not news — skip the item entirely.
+_DATA_DUMP_RE = re.compile(
+    r"\b(net transfers|transfers in|transfers out|ownership %|change %)\b", re.I
+)
+_MAX_SENTENCE_LEN = 400  # real news sentences are shorter; table rows are not
+
 MAX_RULE_CONFIDENCE = 0.6
 MAX_ITEM_AGE_DAYS = 7
 _SUMMARY_LIMIT = 200
@@ -87,25 +93,25 @@ def extract_signals_rule(item: dict, idx: dict) -> list[dict]:
     age = item_age_days(item.get("published_at"))
     if age is not None and age > MAX_ITEM_AGE_DAYS:
         return []
+    if _DATA_DUMP_RE.search(title or ""):
+        return []
 
     text = f"{title}\n{body}"
-    found = names_mod.resolve_candidates(text, idx)
-    if not found:
+    # fast-path gate: nothing anywhere in the item → no per-sentence work
+    if not names_mod.resolve_candidates(text, idx):
         return []
-    by_player: dict[int, int] = {}
-    for c in found:
-        by_player[c["player_id"]] = max(by_player.get(c["player_id"], 0), int(c["score"] * 100))
 
     signals: list[dict] = []
     for sent in _sentences(text):
-        sent_flat = names_mod._flat(sent)
-        # exact-match only: a sentence counts for a player when a canonical
-        # occurrence (score 1.0) or a misspelling occurrence (0.9) is inside it
-        players_in_sent: set[int] = set()
-        for c in found:
-            s, e = c["span"]
-            if s < len(text) and text[s:e] in sent or sent_flat and names_mod._flat(text[s:e]) in sent_flat:
-                players_in_sent.add(c["player_id"])
+        if len(sent) > _MAX_SENTENCE_LEN:
+            continue  # data-dump line (tables etc.) — not a news sentence
+        # FIX §12: resolve per sentence. resolve_candidates computes spans on
+        # a de-accented/lowercased copy of the text — different offsets than
+        # the original when input is NFD-decomposed — and the old global-span
+        # reuse sliced the ORIGINAL text with them (fragile). Per-sentence
+        # resolution is direct and cheap (the index regex is compiled once).
+        players_in_sent = {c["player_id"]
+                           for c in names_mod.resolve_candidates(sent, idx)}
         if not players_in_sent:
             continue
         for cat, pats in _COMPILED.items():

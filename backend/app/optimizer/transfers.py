@@ -1,12 +1,18 @@
 """Transfer math + chip advice (PLAN-2 T1.8; v2 in M4 T4.2).
 
-FPL transfer counting: every player in AND every player out is one transfer
-(a swap = 2 transfers). Penalty = 4 pts per transfer over the free bank.
+FPL transfer counting: a swap (one player out + one player in) is ONE transfer.
+Penalty = 4 pts per transfer over the free bank.
+
+FPL hard cap: 20 transfers in one GW (lifted by Wildcard/Free Hit).
+`chip_covers_transfers` centralises the "is a chip covering transfers for
+this GW?" rule so the solver objective, `compute_diff` and the chip advice
+all agree.
 """
 from __future__ import annotations
 
 from .. import season as season_svc
 from ..db import query, query_one
+from .rules import BUDGET as BUDGET_TOTAL
 
 CHIP_NAMES = ("wildcard", "freehit", "bboost", "triple_captain")
 
@@ -24,36 +30,78 @@ def sell_value(bought_cost: int | None, now_cost: int) -> int:
 
 
 def compute_diff(current_squad: list[dict], new_squad: list[dict], bank: int,
-                 chips: dict | None = None) -> dict:
+                 chips: dict | None = None, chip_covers: bool = False,
+                 ep_by_player: dict[int, float] | None = None) -> dict:
     """Diff a suggested squad against the user's current squad (PLAN.MD §8.6).
 
     current_squad entries: {player_id, web_name, now_cost, bought_cost}
     new_squad entries:      {player_id, web_name, now_cost}
+
+    Transfer counting: a swap (one out + one in) is ONE transfer, so
+    ``transfers = max(len(in), len(out))`` (equal for a validated 15-man
+    squad; ``max`` is safe for degenerate test squads).
+
+    ``chip_covers`` (a Wildcard/Free Hit covers the target GW): all transfers
+    are free — no penalty and the bank carries over unchanged. Otherwise the
+    bank floor is 1 (FPL never banks below 1: each GW resets to 1 free
+    transfer plus carryover).
+
+    ``ep_by_player`` (FIX T9): optional id → projected-EP map from the solver's
+    universe; when given, each transfers_in/transfers_out entry carries the
+    player's ``ep`` so the card can show why a swap is worth making.
+
+    Money (FIX T1): ``budget_after`` is honest FPL money — selling frees the
+    sell value, not the current price, so fees from risen players are added
+    back: ``budget_after = 1000 − Σ new now_cost + Σ fee``. ``budget_before``
+    is the app's money view of the current squad (1000 − Σ now_cost).
+
+    The returned dict also carries ``chip_covers`` and ``bank_before`` so the
+    UI can explain why the penalty is 0 (covered by a chip) instead of showing
+    a misleading "0 / bank" + "none".
     """
     cur_by_id = {p["player_id"]: p for p in current_squad}
     new_by_id = {p["player_id"]: p for p in new_squad}
     out_ids = [pid for pid in cur_by_id if pid not in new_by_id]
     in_ids = [pid for pid in new_by_id if pid not in cur_by_id]
 
+    def _ep(pid: int):
+        """FIX T9: projected EP for a diff entry, or None when not in the map."""
+        if ep_by_player is not None and pid in ep_by_player:
+            return round(float(ep_by_player[pid]), 2)
+        return None
+
     transfers_out = [
         {
             "player_id": pid,
             "web_name": cur_by_id[pid].get("web_name"),
             "sell_value": sell_value(cur_by_id[pid].get("bought_cost"), cur_by_id[pid]["now_cost"]),
+            "ep": _ep(pid),
         }
         for pid in out_ids
     ]
     transfers_in = [
         {"player_id": pid, "web_name": new_by_id[pid].get("web_name"),
-         "cost": new_by_id[pid]["now_cost"]}
+         "cost": new_by_id[pid]["now_cost"], "ep": _ep(pid)}
         for pid in in_ids
     ]
     cost_delta = sum(t["cost"] for t in transfers_in) - sum(t["sell_value"] for t in transfers_out)
     total_cost_after = sum(p["now_cost"] for p in new_squad)
-    transfers = len(in_ids) + len(out_ids)
-    free_used = min(transfers, bank)
-    bank_after = max(0, bank - transfers)
-    penalty = 4 * max(0, transfers - bank)
+    transfers = max(len(in_ids), len(out_ids))
+    if chip_covers:
+        free_used = 0            # wildcard/free hit does not consume the bank
+        bank_after = bank        # bank carries over unchanged
+        penalty = 0
+    else:
+        free_used = min(transfers, bank)
+        bank_after = max(1, bank - transfers)   # FPL floor: bank never below 1
+        penalty = 4 * max(0, transfers - bank)
+    # FIX T1: money the user actually has after the transfers. Selling a risen
+    # player pays less than their current price — the fee (now − sell) is
+    # destroyed value, so it comes OFF the naive 1000 − Σ new view. (The spec
+    # snippet wrote "+ fee_sum", but its own feasibility math — "a strictly
+    # tighter constraint", solver check total + in − out + fee ≤ 1000 —
+    # requires minus; plus would make fee-bearing sales look richer.)
+    fee_sum = sum(cur_by_id[t["player_id"]]["now_cost"] - t["sell_value"] for t in transfers_out)
     return {
         "transfers_in": transfers_in,
         "transfers_out": transfers_out,
@@ -62,7 +110,48 @@ def compute_diff(current_squad: list[dict], new_squad: list[dict], bank: int,
         "free_transfers_used": free_used,
         "bank_after": bank_after,
         "penalty_points": penalty,
+        "chip_covers": bool(chip_covers),
+        "bank_before": bank,
+        "budget_before": BUDGET_TOTAL - sum(p["now_cost"] for p in current_squad),
+        "budget_after": BUDGET_TOTAL - total_cost_after - fee_sum,
     }
+
+
+def freehit_played_in(gw: int | None) -> bool:
+    """True when a Free Hit was played in gameweek ``gw`` (chip_plays_log).
+
+    Team-level fact, deliberately NOT scoped to a lineup id: the manual
+    chip-play endpoint logs lineup_id = NULL and apply-time logging uses the
+    generating lineup's id, which goes stale on re-import.
+    """
+    if gw is None:
+        return False
+    return query_one(
+        "SELECT 1 AS x FROM chip_plays_log WHERE gw = ? AND chip = 'freehit'", (gw,)
+    ) is not None
+
+
+def chip_covers_transfers(chips: dict | None, target_gw: int | None) -> bool:
+    """True when a wildcard or free-hit is playable for the target GW — in that
+    GW the transfer count is unlimited (no penalty, no 20-transfer cap).
+
+    A Free Hit played in the previous GW bans the Free Hit (chip_plays_log,
+    checked by gameweek — the ban is a team-level fact, not per lineup row).
+    """
+    chips = chips or {}
+    if chips.get("wildcard", 0) <= 0 and chips.get("freehit", 0) <= 0:
+        return False
+    windows = {w["chip"]: w for w in season_svc.active_chip_windows()}
+    for chip in ("wildcard", "freehit"):
+        if chips.get(chip, 0) <= 0:
+            continue
+        w = windows.get(chip)
+        if not (w and w.get("playable_next_gw")):
+            continue
+        if chip == "freehit" and freehit_played_in(target_gw - 1):
+            continue
+        return True
+    return False
 
 
 def chip_advice_v1(diff: dict, chips: dict | None, current_gw: int | None,
@@ -74,8 +163,10 @@ def chip_advice_v1(diff: dict, chips: dict | None, current_gw: int | None,
     advice: list[dict] = []
     chips = chips or {}
     windows = {w["chip"]: w for w in season_svc.active_chip_windows()}
-    transfers = len(diff["transfers_in"]) + len(diff["transfers_out"])
-    bank_before = _bank_before(diff)
+    transfers = max(len(diff["transfers_in"]), len(diff["transfers_out"]))
+    # A22: compute_diff always writes bank_before; a diff without it is a
+    # legacy row — fail loudly instead of guessing wrong bank arithmetic.
+    bank_before = diff["bank_before"]
 
     def window_open(chip: str) -> bool:
         w = windows.get(chip)
@@ -152,8 +243,9 @@ def chip_advice_v2(diff: dict, chips: dict | None, solved, current_gw: int | Non
     chips = chips or {}
     signals = signals or {}
     windows = {w["chip"]: w for w in season_svc.active_chip_windows()}
-    transfers = len(diff["transfers_in"]) + len(diff["transfers_out"])
-    bank_before = _bank_before(diff)
+    transfers = max(len(diff["transfers_in"]), len(diff["transfers_out"]))
+    # A22: bank_before is required (see chip_advice_v1) — no fallback guess.
+    bank_before = diff["bank_before"]
 
     # EP data from the solved lineup (universe carries precomputed ep).
     universe = getattr(solved, "universe", None) or []
@@ -199,12 +291,8 @@ def chip_advice_v2(diff: dict, chips: dict | None, solved, current_gw: int | Non
                        "reason": f"{transfers} transfers fit in the bank of {bank_before}"})
 
     # FREE HIT (same trigger as wildcard + consecutive-GW ban)
-    prev_gw = (next_gw - 1) if next_gw else current_gw
-    fh_played_prev = False
-    if prev_gw is not None:
-        fh_played_prev = query_one(
-            "SELECT 1 AS x FROM chip_plays_log WHERE gw = ? AND chip = 'freehit'", (prev_gw,)
-        ) is not None
+    prev_gw = (next_gw or current_gw) - 1 if (next_gw or current_gw) else None
+    fh_played_prev = freehit_played_in(prev_gw)
     if not window_open("freehit"):
         advice.append({"chip": "freehit", "recommendation": "skip",
                        "reason": "no active free-hit window covers the next GW"})
@@ -258,9 +346,3 @@ def chip_advice_v2(diff: dict, chips: dict | None, solved, current_gw: int | Non
                        "reason": f"bench EP {bench_sum:.1f} is below 0.5× XI avg ({xi_avg:.1f})"})
 
     return advice
-
-
-def _bank_before(diff: dict) -> int:
-    """Recover the pre-diff bank: bank_after = max(0, bank − transfers),
-    free_used = min(transfers, bank) → bank = bank_after + free_used."""
-    return diff["bank_after"] + diff["free_transfers_used"]

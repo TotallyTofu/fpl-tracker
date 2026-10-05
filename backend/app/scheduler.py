@@ -62,11 +62,29 @@ async def _job_youtube() -> None:
         log.exception("scheduled youtube refresh failed")
 
 
+async def _job_entry_rank() -> None:
+    """T4.4: keep the public entry rank fresh (15 min). No-op when the user
+    has not set an entry ID (the job is always registered so an ID added via
+    Settings takes effect without a restart)."""
+    from .fetchers import fpl as fpl_fetcher
+
+    entry_id = (load_settings().config.group.fpl_entry_id or "").strip()
+    if not entry_id:
+        return
+    try:
+        await fpl_fetcher.fetch_entry(entry_id)
+    except Exception:
+        log.exception("scheduled entry rank refresh failed")
+
+
 async def _job_extract() -> None:
     from .signals.pipeline import process_pending_items
 
     try:
-        await process_pending_items(limit=50)
+        # FIX N8: the pass is time-budgeted so a slow local model cannot hold
+        # the coalescing job forever — remaining items stay pending.
+        await process_pending_items(
+            limit=50, timebox_sec=load_settings().config.llm.extract_timebox_sec)
     except Exception:
         log.exception("scheduled extraction pass failed")
 
@@ -91,4 +109,6 @@ def create_scheduler(app) -> AsyncIOScheduler:
                       id="youtube", **_JOB_KW)
     # extraction pass: drains the raw_items queue (LLM when ready, else rules)
     sched.add_job(_job_extract, "interval", minutes=10, id="extract", **_JOB_KW)
+    # public entry rank (T4.4): always registered; no-op until an entry ID is set
+    sched.add_job(_job_entry_rank, "interval", minutes=15, id="entry_rank", **_JOB_KW)
     return sched

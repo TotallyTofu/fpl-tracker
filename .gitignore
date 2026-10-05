@@ -19,3 +19,5 @@ tmp-video-test/
 probe_sources.py
 .npm-cache/
 .playwright-mcp/
+# pytest temp dirs (when the system temp dir is not writable)
+pytest-of-*/

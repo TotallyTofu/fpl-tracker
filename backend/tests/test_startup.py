@@ -23,7 +23,9 @@ def _settings(bbc: bool = True, espn: bool = False, reddit: bool = True, youtube
                 espn=types.SimpleNamespace(enabled=espn),
                 reddit=types.SimpleNamespace(enabled=reddit),
                 youtube=types.SimpleNamespace(enabled=youtube, channels=[]),
-            )
+            ),
+            # FIX N8: the startup pass passes the extraction timebox through.
+            llm=types.SimpleNamespace(extract_timebox_sec=480),
         )
     )
 
@@ -143,7 +145,7 @@ def test_endpoint_idle_by_default(db_path):
 
 
 def _fake_pipeline(n: int):
-    async def _fn(limit: int = 50):
+    async def _fn(limit: int = 50, timebox_sec=None):  # FIX N8: accepts the timebox
         return n
 
     return _fn

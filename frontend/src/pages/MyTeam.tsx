@@ -9,7 +9,7 @@ import PlayerPicker from "../components/PlayerPicker";
 import ValidationPanel from "../components/ValidationPanel";
 import { useSeason } from "../hooks/useSeason";
 import { validateClient } from "../rules";
-import type { Lineup, LineupPlayer, LineupSummary, MatchedPlayer, Player } from "../types";
+import type { Lineup, LineupPlayer, LineupSummary, MatchedPlayer, Player, SquadPlayer } from "../types";
 import { POS_NAME, cost } from "../types";
 
 interface Draft {
@@ -17,6 +17,7 @@ interface Draft {
   name: string;
   bank: number;
   chips: Record<string, number>;
+  kind: "current" | "test"; // A16: carried through so saves never promote a test copy
   players: LineupPlayer[];
 }
 
@@ -35,12 +36,13 @@ function toDraft(l: Lineup): Draft {
     name: l.name,
     bank: l.transfer_bank,
     chips: l.chips,
+    kind: l.kind,
     players: l.players,
   };
 }
 
 function emptyDraft(): Draft {
-  return { id: null, name: "My team", bank: 1, chips: { ...EMPTY_CHIPS }, players: [] };
+  return { id: null, name: "My team", bank: 1, chips: { ...EMPTY_CHIPS }, kind: "current", players: [] };
 }
 
 /** Recompute starter/bench roles + bench orders for a squad of ≤15.
@@ -85,6 +87,38 @@ function assignRoles(squad: LineupPlayer[], previous: LineupPlayer[]): LineupPla
       is_vice_captain: p.player_id === vcStillIn,
     };
   });
+}
+
+/** Bench orders currently in use (1–4). */
+const benchOrders = (d: Draft) =>
+  d.players
+    .filter((p) => p.role === "bench")
+    .map((p) => p.bench_order)
+    .filter((o): o is number => o != null);
+
+/** First free bench slot (1–4), or null when the bench is full. */
+const freeBenchSlot = (d: Draft) => [1, 2, 3, 4].find((o) => !benchOrders(d).includes(o)) ?? null;
+
+/** Renumber bench players to exactly 1–4 (order kept, ties by EP). */
+function renumberBench(players: LineupPlayer[]): LineupPlayer[] {
+  const bench = players
+    .filter((p) => p.role === "bench")
+    .sort((a, b) => (a.bench_order ?? 9) - (b.bench_order ?? 9) || (b.ep_next ?? 0) - (a.ep_next ?? 0));
+  const orderById = new Map(bench.map((p, i) => [p.player_id, i + 1]));
+  return players.map((p) =>
+    p.role === "bench" ? { ...p, bench_order: orderById.get(p.player_id) ?? null } : p
+  );
+}
+
+/** Pick the swap victim when the target side is full: same position first,
+ *  then lowest EP, then id (deterministic). */
+function pickSwapVictim(candidates: LineupPlayer[], position: number): LineupPlayer | null {
+  const samePos = candidates.filter((p) => p.element_type === position);
+  const pool = samePos.length ? samePos : candidates;
+  if (!pool.length) return null;
+  return [...pool].sort(
+    (a, b) => (a.ep_next ?? 0) - (b.ep_next ?? 0) || a.player_id - b.player_id
+  )[0];
 }
 
 type SortKey = "web_name" | "element_type" | "team_name" | "now_cost" | "ep_next" | "selected_by_percent";
@@ -136,6 +170,13 @@ export default function MyTeam() {
   const addPlayer = (p: Player) =>
     patch((d) => {
       if (d.players.length >= 15) return d;
+      // Starter while the XI has room — but FPL allows exactly 1 GK in the XI,
+      // so a second GK always starts on the bench.
+      const xiFull = d.players.filter((x) => x.role === "starter").length >= 11;
+      const gkAlreadyStarted = p.element_type === 1 && d.players.some((x) => x.role === "starter" && x.element_type === 1);
+      const slot = freeBenchSlot(d);
+      const toBench = xiFull || gkAlreadyStarted;
+      if (toBench && slot == null) return d;
       const np: LineupPlayer = {
         player_id: p.id,
         web_name: p.web_name,
@@ -148,13 +189,13 @@ export default function MyTeam() {
         ep_next: p.ep_next,
         selected_by_percent: p.selected_by_percent,
         chance_of_playing_next_round: p.chance_of_playing_next_round,
-        role: "starter",
-        bench_order: null,
+        role: toBench ? "bench" : "starter",
+        bench_order: toBench ? slot : null,
         is_captain: false,
         is_vice_captain: false,
         bought_cost: p.now_cost,
       };
-      return { ...d, players: assignRoles([...d.players, np], d.players) };
+      return { ...d, players: [...d.players, np] };
     });
 
   const swapPlayer = (p: Player) =>
@@ -205,7 +246,7 @@ export default function MyTeam() {
       return { ...d, players: assignRoles([...keep, ...added], d.players) };
     });
 
-  const selectPlayer = (p: LineupPlayer) => setSelectedId(p.player_id);
+  const selectPlayer = (p: SquadPlayer) => setSelectedId(p.player_id);
 
   const setCaptain = () =>
     patch((d) => ({
@@ -246,9 +287,132 @@ export default function MyTeam() {
 
   const removePlayer = () =>
     patch((d) => {
-      const next = d.players.filter((p) => p.player_id !== selectedId);
-      return { ...d, players: assignRoles(next, d.players) };
+      const removed = d.players.find((p) => p.player_id === selectedId);
+      let players = d.players.filter((p) => p.player_id !== selectedId);
+      // If a starter leaves, auto-promote the best eligible bench player
+      // (prefer the same position, e.g. a bench GK when the GK is removed;
+      // otherwise the highest EP).
+      if (removed?.role === "starter") {
+        const bench = players
+          .filter((p) => p.role === "bench")
+          .sort(
+            (a, b) =>
+              (a.element_type === removed.element_type ? -1 : 0) -
+              (b.element_type === removed.element_type ? -1 : 0) ||
+              (b.ep_next ?? 0) - (a.ep_next ?? 0)
+          );
+        if (bench[0]) {
+          players = players.map((p) =>
+            p.player_id === bench[0].player_id
+              ? { ...p, role: "starter" as const, bench_order: null }
+              : p
+          );
+        }
+      }
+      return { ...d, players: renumberBench(players) };
     });
+
+  // Demote a starter to the bench. FPL rule: captain/VC must stay in the XI,
+  // so the UI blocks the move (the server would 422 with CAPTAIN_NOT_IN_XI anyway).
+  // When the bench is full, the move becomes a swap: the lowest-EP eligible
+  // bench player (same position first) takes the starter's XI slot.
+  const moveToBench = (id: number) =>
+    patch((d) => {
+      const p = d.players.find((x) => x.player_id === id);
+      if (!p || p.role !== "starter" || p.is_captain || p.is_vice_captain) return d;
+      const slot = freeBenchSlot(d);
+      if (slot != null) {
+        return {
+          ...d,
+          players: d.players.map((x) =>
+            x.player_id === id ? { ...x, role: "bench" as const, bench_order: slot } : x
+          ),
+        };
+      }
+      // Bench full: swap. A bench GK can't take the slot (the XI already has
+      // its one GK), so exclude GKs from the candidates.
+      const victim = pickSwapVictim(
+        d.players.filter((x) => x.role === "bench" && x.element_type !== 1),
+        p.element_type
+      );
+      if (!victim) return d;
+      return {
+        ...d,
+        players: d.players.map((x) =>
+          x.player_id === id
+            ? { ...x, role: "bench" as const, bench_order: victim.bench_order }
+            : x.player_id === victim.player_id
+              ? { ...x, role: "starter" as const, bench_order: null }
+              : x
+        ),
+      };
+    });
+
+  // Promote a bench player to the XI.
+  // - Promoting a GK auto-benches the current GK (FPL: exactly 1 GK in the XI);
+  //   the demoted GK takes the promoted GK's now-free bench slot, so this works
+  //   even when the bench is full.
+  // - When the XI is full, the move becomes a swap: the lowest-EP non-C/VC
+  //   starter (same position first) takes the promoted player's bench slot.
+  const moveToXi = (id: number) =>
+    patch((d) => {
+      const p = d.players.find((x) => x.player_id === id);
+      if (!p || p.role !== "bench") return d;
+      let players = d.players;
+      if (p.element_type === 1) {
+        const gk = players.find((x) => x.role === "starter" && x.element_type === 1);
+        if (gk) {
+          players = players.map((x) =>
+            x.player_id === gk.player_id
+              ? { ...x, role: "bench" as const, bench_order: p.bench_order }
+              : x
+          );
+        }
+      } else if (players.filter((x) => x.role === "starter").length >= 11) {
+        const victim = pickSwapVictim(
+          players.filter((x) => x.role === "starter" && !x.is_captain && !x.is_vice_captain),
+          p.element_type
+        );
+        if (!victim) return d;
+        players = players.map((x) =>
+          x.player_id === id
+            ? { ...x, role: "starter" as const, bench_order: null }
+            : x.player_id === victim.player_id
+              ? { ...x, role: "bench" as const, bench_order: p.bench_order }
+              : x
+        );
+        return { ...d, players };
+      }
+      players = players.map((x) =>
+        x.player_id === id ? { ...x, role: "starter" as const, bench_order: null } : x
+      );
+      return { ...d, players: renumberBench(players) };
+    });
+
+  // Drop a bench card onto another bench card: swap their bench orders.
+  const reorderBench = (draggedId: number, targetId: number) =>
+    patch((d) => {
+      const dragged = d.players.find((p) => p.player_id === draggedId);
+      const target = d.players.find((p) => p.player_id === targetId);
+      if (!dragged || !target || dragged.role !== "bench" || target.role !== "bench") return d;
+      const a = dragged.bench_order ?? 0;
+      const b = target.bench_order ?? 0;
+      const swapped = d.players.map((p) =>
+        p.player_id === draggedId
+          ? { ...p, bench_order: b || null }
+          : p.player_id === targetId
+            ? { ...p, bench_order: a || null }
+            : p
+      );
+      return { ...d, players: renumberBench(swapped) };
+    });
+
+  // A15: editable real purchase price per row (drives the sell-on fee).
+  const setPaid = (id: number, v: number | null) =>
+    patch((d) => ({
+      ...d,
+      players: d.players.map((p) => (p.player_id === id ? { ...p, bought_cost: v } : p)),
+    }));
 
   const selected = draft.players.find((p) => p.player_id === selectedId) ?? null;
   const totalCost = draft.players.reduce((s, p) => s + p.now_cost, 0);
@@ -280,16 +444,19 @@ export default function MyTeam() {
     setSaving(true);
     setSaveError(null);
     try {
+      // T4.3/A16: send the stored kind so saving a test copy doesn't promote it
       const body = {
         name: draft.name,
         transfer_bank: draft.bank,
         chips: draft.chips,
+        kind: draft.kind,
         players: draft.players.map((p) => ({
           player_id: p.player_id,
           role: p.role,
           bench_order: p.bench_order,
           is_captain: p.is_captain,
           is_vice_captain: p.is_vice_captain,
+          bought_cost: p.bought_cost, // A15: preserve real purchase prices
         })),
       };
       const saved = draft.id
@@ -343,6 +510,7 @@ export default function MyTeam() {
             bench_order: p.bench_order,
             is_captain: p.is_captain,
             is_vice_captain: p.is_vice_captain,
+            bought_cost: p.bought_cost, // A15: preserve real purchase prices
           })),
         })
       )
@@ -370,6 +538,22 @@ export default function MyTeam() {
   };
 
   const benchCount = draft.players.filter((p) => p.role === "bench").length;
+  const xiCount = draft.players.filter((p) => p.role === "starter").length;
+  // Who a full-side move would swap with (shown in the button tooltips).
+  const benchSwapVictim =
+    selected && selected.role === "starter" && benchCount >= 4
+      ? pickSwapVictim(
+          draft.players.filter((x) => x.role === "bench" && x.element_type !== 1),
+          selected.element_type
+        )
+      : null;
+  const xiSwapVictim =
+    selected && selected.role === "bench" && selected.element_type !== 1 && xiCount >= 11
+      ? pickSwapVictim(
+          draft.players.filter((x) => x.role === "starter" && !x.is_captain && !x.is_vice_captain),
+          selected.element_type
+        )
+      : null;
 
   return (
     <div>
@@ -393,7 +577,16 @@ export default function MyTeam() {
         <div>
           <ValidationPanel errors={clientErrors} />
           <div className="panel">
-            <h2 style={{ marginTop: 0 }}>Squad ({draft.players.length}/15)</h2>
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+              <h2 style={{ marginTop: 0 }}>Squad ({draft.players.length}/15)</h2>
+              <button
+                className="sm ghost"
+                onClick={() => patch((d) => ({ ...d, players: assignRoles(d.players, d.players) }))}
+                title="Recompute the XI and bench from projected points (overrides your manual arrangement)"
+              >
+                Auto-pick XI
+              </button>
+            </div>
             <div style={{ maxHeight: 300, overflowY: "auto" }}>
               <table>
                 <thead>
@@ -402,6 +595,7 @@ export default function MyTeam() {
                     <th onClick={() => clickSort("web_name")}>Name</th>
                     <th onClick={() => clickSort("team_name")}>Club</th>
                     <th onClick={() => clickSort("now_cost")}>Cost</th>
+                    <th title="Price you paid (defaults to the current price). Drives the sell-on fee in diffs.">Paid</th>
                     <th onClick={() => clickSort("ep_next")}>EP</th>
                     <th onClick={() => clickSort("selected_by_percent")}>Own %</th>
                     <th>Role</th>
@@ -422,6 +616,22 @@ export default function MyTeam() {
                       <td>{p.web_name}</td>
                       <td>{p.team_name}</td>
                       <td>{cost(p.now_cost)}</td>
+                      <td onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="number"
+                          min={0}
+                          step={1}
+                          style={{ width: 56 }}
+                          value={p.bought_cost ?? p.now_cost}
+                          onChange={(e) =>
+                            setPaid(
+                              p.player_id,
+                              e.target.value === "" ? null : Math.max(0, Math.round(Number(e.target.value)))
+                            )
+                          }
+                          title="Price you paid, same units as Cost (45 = £4.5m). Drives the sell-on fee in diffs."
+                        />
+                      </td>
                       <td>{p.ep_next != null ? p.ep_next.toFixed(1) : "—"}</td>
                       <td>{p.selected_by_percent != null ? p.selected_by_percent.toFixed(1) : "—"}</td>
                       <td className="small muted">
@@ -446,6 +656,35 @@ export default function MyTeam() {
                 <button className="sm" onClick={setVice} disabled={selected.role !== "starter"} title={selected.role !== "starter" ? "Vice-captain must be a starter" : ""}>
                   Set VC
                 </button>
+                {selected.role === "starter" && (
+                  <button
+                    className="sm"
+                    onClick={() => moveToBench(selected.player_id)}
+                    disabled={selected.is_captain || selected.is_vice_captain}
+                    title={
+                      selected.is_captain || selected.is_vice_captain
+                        ? "Captain/VC must stay in the XI — change captaincy first"
+                        : benchCount >= 4
+                          ? `Bench is full — will swap with ${benchSwapVictim?.web_name ?? "the lowest-EP bench player"}`
+                          : ""
+                    }
+                  >
+                    Send to bench
+                  </button>
+                )}
+                {selected.role === "bench" && (
+                  <button
+                    className="sm"
+                    onClick={() => moveToXi(selected.player_id)}
+                    title={
+                      selected.element_type !== 1 && xiCount >= 11
+                        ? `XI is full — will swap with ${xiSwapVictim?.web_name ?? "the lowest-EP starter"}`
+                        : ""
+                    }
+                  >
+                    Move to XI
+                  </button>
+                )}
                 {selected.role === "bench" &&
                   [1, 2, 3, 4].map((o) => (
                     <button key={o} className="sm ghost" onClick={() => setBenchOrder(o)} disabled={benchCount < o}>
@@ -458,7 +697,14 @@ export default function MyTeam() {
               </div>
             )}
           </div>
-          <PitchView players={draft.players} selectedId={selectedId} onSelect={selectPlayer} />
+          <PitchView
+            players={draft.players}
+            selectedId={selectedId}
+            onSelect={selectPlayer}
+            onMoveToBench={moveToBench}
+            onMoveToXi={moveToXi}
+            onBenchReorder={reorderBench}
+          />
         </div>
       </div>
       {season && (
