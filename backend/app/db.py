@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -454,10 +455,19 @@ def init_db(path: str | Path | None = None) -> None:
 
 def get_conn(path: str | Path | None = None) -> sqlite3.Connection:
     p = Path(path) if path else DB_PATH
-    conn = sqlite3.connect(p)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    # Windows can briefly refuse to open the file ("unable to open database
+    # file") while several jobs open and close connections at once — retry.
+    for attempt in range(6):
+        try:
+            conn = sqlite3.connect(p, timeout=15)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys=ON")
+            return conn
+        except sqlite3.OperationalError as e:
+            if "unable to open" not in str(e).lower() or attempt == 5:
+                raise
+            time.sleep(0.2 * (attempt + 1))
+    raise RuntimeError("unreachable")
 
 
 def query(sql: str, params: tuple | list = ()) -> list[dict]:

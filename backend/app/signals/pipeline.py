@@ -197,12 +197,19 @@ def requeue_skipped(days: int = 7) -> dict:
     if not ids:
         return {"requeued": 0, "signals_removed": 0}
     marks = ",".join("?" * len(ids))
-    removed = query(
-        f"SELECT COUNT(*) AS n FROM signals WHERE model = 'rules' AND raw_item_id IN ({marks})",
-        ids)[0]["n"]
-    execute(f"DELETE FROM signals WHERE model = 'rules' AND raw_item_id IN ({marks})", ids)
-    execute(f"UPDATE raw_items SET processed = 0, extract_attempts = 0, takeaways = NULL "
-            f"WHERE id IN ({marks})", ids)
+    from ..db import get_conn
+    conn = get_conn()           # one connection, one transaction: all or nothing
+    try:
+        removed = conn.execute(
+            f"DELETE FROM signals WHERE model = 'rules' AND raw_item_id IN ({marks})", ids).rowcount
+        conn.execute(f"UPDATE raw_items SET processed = 0, extract_attempts = 0, takeaways = NULL "
+                     f"WHERE id IN ({marks})", ids)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     return {"requeued": len(ids), "signals_removed": removed}
 
 
