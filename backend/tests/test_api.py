@@ -1,5 +1,6 @@
 """API integration tests against a temp DB (no network — lifespan not entered)."""
 import pytest
+from conftest import RECENT
 from fastapi.testclient import TestClient
 
 from app.main import create_app
@@ -40,7 +41,7 @@ def test_meta_season(client):
     assert d["current_gw"] == 5
     assert d["next_gw"] == 6
     assert d["deadline"] == "2026-09-27T10:00:00Z"
-    assert len(d["fixtures_next_gw"]) == 2
+    assert len(d["fixtures_next_gw"]) == 3
     assert d["fixtures_next_gw"][0]["home_name"] == "Alpha FC"
     chips = {w["chip"] for w in d["chip_windows"]}
     assert {"wildcard", "freehit", "bboost", "triple_captain"} <= chips
@@ -79,7 +80,7 @@ def test_players_has_signal_filter(client):
     store.save_signals([
         {"player_id": 1, "category": "injury", "sentiment": "negative",
          "confidence": 0.5, "summary": "Goal One ruled out.", "source": "bbc:x1",
-         "url": None, "published_at": "2026-09-19T12:00:00Z", "raw_item_id": None,
+         "url": None, "published_at": RECENT, "raw_item_id": None,
          "model": "rules"},
     ])
     dbmod.execute(
@@ -604,18 +605,34 @@ def _insert_suggestion(lid: int, advice: list[dict]) -> int:
 
 
 def test_apply_decrements_used_chip(client):
-    """§25.3 (T3): applying a suggestion whose advice says 'use wildcard'
-    decrements the lineup's in-hand wildcard set — otherwise the lineup keeps
-    claiming a wildcard whenever a window is open and every later generate
-    re-opens the unlimited-transfers hole (the Wildcard-side twin of B1)."""
+    """§25.3 (T3), v1.0: applying a suggestion generated WITH a chip logs that
+    chip and decrements the in-hand set. Advice alone ("use" on a chip the user
+    did not choose) logs nothing — FPL allows one chip per gameweek and the
+    user decides which."""
     body = dict(VALID_BODY, chips={"wildcard": 1, "freehit": 2, "bboost": 2, "triple_captain": 2})
     lid = client.post("/api/lineups", json=body).json()["id"]
     advice = [{"chip": "wildcard", "recommendation": "use", "reason": "bank is thin"}]
     sid = _insert_suggestion(lid, advice)
     r = client.post(f"/api/suggestions/{sid}/apply")
     assert r.status_code == 200, r.text
+    assert r.json()["chips_logged"] == []
+    assert client.get(f"/api/lineups/{lid}").json()["chips"]["wildcard"] == 1
+
+    r = client.post("/api/suggestions/generate", json={"lineup_id": lid, "chip": "wildcard"})
+    assert r.status_code == 200, r.text
+    sug = r.json()["suggestions"][0]
+    assert sug["diff"]["chip_played"] == "wildcard"
+    r = client.post(f"/api/suggestions/{sug['id']}/apply")
     assert r.json()["chips_logged"] == ["wildcard"]
     assert client.get(f"/api/lineups/{lid}").json()["chips"]["wildcard"] == 0
+
+
+def test_generate_rejects_unplayable_chip(client):
+    body = dict(VALID_BODY, chips={"wildcard": 0, "freehit": 2, "bboost": 2, "triple_captain": 2})
+    lid = client.post("/api/lineups", json=body).json()["id"]
+    r = client.post("/api/suggestions/generate", json={"lineup_id": lid, "chip": "wildcard"})
+    assert r.status_code == 422
+    assert "sets remaining" in r.text
 
 
 def test_apply_refuses_test_lineup(client):

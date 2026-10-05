@@ -7,9 +7,16 @@ FPL news changes are handled by ``process_official_news`` (called from the
 bootstrap fetch).
 
 FIX N9: a cheap LLM circuit breaker skips the LLM for a pass when it is
-failing repeatedly (rules still run). FIX N10: a hard LLM failure is
-retryable — the attempt is counted and the item is requeued up to
-``MAX_EXTRACT_ATTEMPTS`` times instead of being lost forever.
+failing repeatedly. FIX N10: a hard LLM failure is retryable — the attempt is
+counted and the item is requeued up to ``MAX_EXTRACT_ATTEMPTS`` times.
+
+v1.0: the keyword extractor is a FALLBACK, not a co-author. When the LLM reads
+an item successfully only its signals are stored (keyword matches used to be
+stored next to them and often contradicted them). Rules run when the LLM is
+not configured, after its final failed attempt, or when it has been down for
+longer than ``llm.llm_wait_hours``. While the breaker is open, items wait
+(they used to be marked done with rules only, so 169 items never reached the
+LLM); ``requeue_skipped`` puts those older items back in the queue.
 """
 from __future__ import annotations
 
@@ -18,7 +25,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from ..config import Settings, load_settings
-from ..db import now_utc, query
+from ..db import execute, now_utc, query
 from . import ingest, rule_extractor, store
 from .llm_extractor import extract_signals_llm
 from .names import get_name_index
@@ -31,6 +38,19 @@ MAX_EXTRACT_ATTEMPTS = 3
 
 _BREAKER_WINDOW_MIN = 30
 _BREAKER_MIN_ERRORS = 2
+_BREAKER_NOTE = "circuit breaker open"
+
+
+def _waited_too_long(item: dict, hours: float) -> bool:
+    """True when the item has waited longer than ``hours`` since retrieval."""
+    ts = item.get("retrieved_at")
+    if not ts:
+        return True
+    try:
+        got = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return True
+    return datetime.now(timezone.utc) - got > timedelta(hours=hours)
 
 
 def _player_list() -> list[dict]:
@@ -64,13 +84,10 @@ def _llm_breaker_open() -> bool:
 async def process_item(item: dict, settings: Settings | None = None) -> int:
     """Extract signals for one raw item. Returns count stored.
 
-    LLM first (when ready), rule path always as backstop. Never raises —
-    a bad item must not block the queue.
-
-    FIX N10: a hard LLM failure (``extract_signals_llm`` → None) is
-    retryable — the attempt is counted (``raw_items.extract_attempts``) and
-    the item stays pending (requeued) until ``MAX_EXTRACT_ATTEMPTS``; the
-    rule-path signals are saved on every attempt.
+    LLM first (when ready); the keyword rules only when the LLM is not
+    configured or could not read the item (see module doc). Never raises —
+    a bad item must not block the queue. Returns -1 when the item was left
+    waiting for the LLM (breaker open).
     """
     settings = settings or load_settings()
     try:
@@ -79,14 +96,17 @@ async def process_item(item: dict, settings: Settings | None = None) -> int:
         text = f"{item.get('title') or ''}\n{item.get('body') or ''}"
 
         llm_signals: list[dict] = []
-        llm_retryable = False
+        llm_ok = False
         breaker_note: str | None = None
         if settings.llm_ready:
             if _llm_breaker_open():
-                breaker_note = ("LLM skipped this pass: circuit breaker open "
-                                f"(≥{_BREAKER_MIN_ERRORS} failures in the last "
-                                f"{_BREAKER_WINDOW_MIN} min)")
-                log.info("raw_items.id=%s: %s", item.get("id"), breaker_note)
+                wait_h = float(getattr(settings.config.llm, "llm_wait_hours", 6) or 0)
+                if not _waited_too_long(item, wait_h):
+                    log.info("raw_items.id=%s: LLM failing (breaker open) — item waits",
+                             item.get("id"))
+                    return -1
+                breaker_note = (f"Keyword match only: the LLM was failing for over "
+                                f"{wait_h:g} h ({_BREAKER_NOTE})")
             else:
                 llm = await extract_signals_llm(
                     text,
@@ -96,9 +116,16 @@ async def process_item(item: dict, settings: Settings | None = None) -> int:
                     settings,
                 )
                 if llm is None:
-                    llm_retryable = True   # FIX N10: hard error → retryable
+                    attempts = ingest.bump_extract_attempts(item["id"])
+                    if attempts < MAX_EXTRACT_ATTEMPTS:
+                        log.info("raw_items.id=%s: LLM hard-failed (attempt %d/%d) — requeued",
+                                 item["id"], attempts, MAX_EXTRACT_ATTEMPTS)
+                        return 0
+                    breaker_note = (f"Keyword match only: the LLM failed "
+                                    f"{MAX_EXTRACT_ATTEMPTS} times on this item")
                 else:
                     llm_signals = llm
+                    llm_ok = True
 
         merged: list[dict] = []
         for s in llm_signals:
@@ -112,23 +139,13 @@ async def process_item(item: dict, settings: Settings | None = None) -> int:
                     "model": f"llm:{settings.llm_model}",
                 }
             )
-        rules = rule_extractor.extract_signals_rule(item, idx)
-        merged.extend(rules)
+        if not llm_ok:
+            merged.extend(rule_extractor.extract_signals_rule(item, idx))
 
         n = store.save_signals(merged)
         takeaways = [s["summary"] for s in merged if s.get("summary")][:5]
         if breaker_note:
             takeaways = [breaker_note] + takeaways[:4]   # FIX N9: surface it
-        if llm_retryable:
-            attempts = ingest.bump_extract_attempts(item["id"])
-            if attempts < MAX_EXTRACT_ATTEMPTS:
-                # FIX N10: leave processed = 0 — the next pass retries the LLM;
-                # rule takeaways are kept so the item is never empty-handed.
-                if takeaways:
-                    ingest.set_takeaways(item["id"], takeaways)
-                log.info("raw_items.id=%s: LLM hard-failed (attempt %d/%d) — requeued",
-                         item["id"], attempts, MAX_EXTRACT_ATTEMPTS)
-                return n
         ingest.mark_processed(item["id"], takeaways or None)
         return n
     except Exception:
@@ -161,8 +178,32 @@ async def process_pending_items(limit: int = 50, timebox_sec: int | None = None,
             log.info("extraction pass hit its %ss timebox — %s signal(s) stored, "
                      "rest of the queue stays pending", timebox_sec, total)
             break
-        total += await process_item(item, settings)
+        n = await process_item(item, settings)
+        total += max(0, n)
     return total
+
+
+def requeue_skipped(days: int = 7) -> dict:
+    """Put items that were marked done WITHOUT the LLM (the old circuit-breaker
+    behaviour) back in the queue, for items retrieved in the last ``days``.
+    Their keyword-only signals are removed first so the LLM's reading
+    replaces them instead of sitting next to them."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = query(
+        "SELECT id FROM raw_items WHERE processed = 1 AND takeaways LIKE ? AND retrieved_at >= ?",
+        (f"%{_BREAKER_NOTE}%", cutoff),
+    )
+    ids = [r["id"] for r in rows]
+    if not ids:
+        return {"requeued": 0, "signals_removed": 0}
+    marks = ",".join("?" * len(ids))
+    removed = query(
+        f"SELECT COUNT(*) AS n FROM signals WHERE model = 'rules' AND raw_item_id IN ({marks})",
+        ids)[0]["n"]
+    execute(f"DELETE FROM signals WHERE model = 'rules' AND raw_item_id IN ({marks})", ids)
+    execute(f"UPDATE raw_items SET processed = 0, extract_attempts = 0, takeaways = NULL "
+            f"WHERE id IN ({marks})", ids)
+    return {"requeued": len(ids), "signals_removed": removed}
 
 
 def process_official_news(players: list[dict]) -> int:

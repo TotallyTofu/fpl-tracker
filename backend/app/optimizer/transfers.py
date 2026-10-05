@@ -1,26 +1,44 @@
-"""Transfer math + chip advice (PLAN-2 T1.8; v2 in M4 T4.2).
+"""Transfer math + chip rules and advice (PLAN-2 T1.8; M4 T4.2; v1.0 rules pass).
 
 FPL transfer counting: a swap (one player out + one player in) is ONE transfer.
-Penalty = 4 pts per transfer over the free bank.
+Penalty = 4 pts per transfer over the free transfers available.
 
 FPL hard cap: 20 transfers in one GW (lifted by Wildcard/Free Hit).
-`chip_covers_transfers` centralises the "is a chip covering transfers for
-this GW?" rule so the solver objective, `compute_diff` and the chip advice
-all agree.
+
+v1.0:
+- A chip is only "played" when the user picks it for the target GW
+  (``chip`` / ``chip_played``). Holding a Wildcard no longer turns every
+  suggestion into a rebuild.
+- One chip per gameweek: the advice recommends "use" for at most one chip,
+  and a chip already logged for the GW blocks the others.
+- Money: ``budget_before``/``budget_after`` are the money in the bank before
+  and after the transfers (the user's figure when known, else the
+  £100m − squad-price estimate, flagged by ``money_known``).
+- ``bank_after`` is the free transfers LEFT this gameweek (0 allowed). The
+  weekly +1 is added when the deadline passes (lineups API, ``bank_gw``).
 """
 from __future__ import annotations
 
-from .. import season as season_svc
 from ..db import query, query_one
 from .rules import BUDGET as BUDGET_TOTAL
 
 CHIP_NAMES = ("wildcard", "freehit", "bboost", "triple_captain")
+TRANSFER_CHIPS = ("wildcard", "freehit")
+CHIP_LABELS = {"wildcard": "Wildcard", "freehit": "Free Hit",
+               "bboost": "Bench Boost", "triple_captain": "Triple Captain"}
+
+# Chip-advice thresholds, in projected points.
+TC_USE_EP = 8.5            # captain EP for "use" (7.0 with a confirmed-starter signal)
+TC_CONSIDER_EP = 7.0
+BB_USE_BENCH = 14.0        # bench projection for "use" (double-gameweek territory)
+BB_CONSIDER_BENCH = 10.0
+WC_CONSIDER_GAIN = 10.0    # extra points a full rebuild projects THIS gameweek
+FH_CONSIDER_GAIN = 15.0
 
 
 def sell_value(bought_cost: int | None, now_cost: int) -> int:
-    """Half-increase sell rule: sells at purchase price + 50% of any increase.
-
-    75→78 sells at 76; 75→77 sells at 76; fall 75→70 sells at 70.
+    """Half-increase sell rule: sells at purchase price + 50% of any increase,
+    rounded down. 75→78 sells at 76; 75→77 sells at 76; fall 75→70 sells at 70.
     (bought_cost missing → assume bought at current price.)
     """
     bought = bought_cost if bought_cost is not None else now_cost
@@ -29,35 +47,27 @@ def sell_value(bought_cost: int | None, now_cost: int) -> int:
     return now_cost
 
 
+def bank_money_estimate(current_squad: list[dict]) -> int:
+    """The pre-v1.0 assumption when the user has not entered their bank:
+    £100.0m minus what the current squad costs today (never negative)."""
+    if not current_squad:
+        return BUDGET_TOTAL
+    return max(0, BUDGET_TOTAL - sum(p["now_cost"] for p in current_squad))
+
+
 def compute_diff(current_squad: list[dict], new_squad: list[dict], bank: int,
                  chips: dict | None = None, chip_covers: bool = False,
-                 ep_by_player: dict[int, float] | None = None) -> dict:
+                 ep_by_player: dict[int, float] | None = None,
+                 bank_money: int | None = None, chip_played: str | None = None) -> dict:
     """Diff a suggested squad against the user's current squad (PLAN.MD §8.6).
 
     current_squad entries: {player_id, web_name, now_cost, bought_cost}
     new_squad entries:      {player_id, web_name, now_cost}
 
-    Transfer counting: a swap (one out + one in) is ONE transfer, so
-    ``transfers = max(len(in), len(out))`` (equal for a validated 15-man
-    squad; ``max`` is safe for degenerate test squads).
-
-    ``chip_covers`` (a Wildcard/Free Hit covers the target GW): all transfers
-    are free — no penalty and the bank carries over unchanged. Otherwise the
-    bank floor is 1 (FPL never banks below 1: each GW resets to 1 free
-    transfer plus carryover).
-
-    ``ep_by_player`` (FIX T9): optional id → projected-EP map from the solver's
-    universe; when given, each transfers_in/transfers_out entry carries the
-    player's ``ep`` so the card can show why a swap is worth making.
-
-    Money (FIX T1): ``budget_after`` is honest FPL money — selling frees the
-    sell value, not the current price, so fees from risen players are added
-    back: ``budget_after = 1000 − Σ new now_cost + Σ fee``. ``budget_before``
-    is the app's money view of the current squad (1000 − Σ now_cost).
-
-    The returned dict also carries ``chip_covers`` and ``bank_before`` so the
-    UI can explain why the penalty is 0 (covered by a chip) instead of showing
-    a misleading "0 / bank" + "none".
+    ``chip_covers`` (a Wildcard/Free Hit is being played): all transfers are
+    free and the free-transfer count is kept. ``bank_money`` is the money in
+    the bank in £0.1m (None = estimate). ``ep_by_player`` adds each player's
+    projected points to the in/out rows.
     """
     cur_by_id = {p["player_id"]: p for p in current_squad}
     new_by_id = {p["player_id"]: p for p in new_squad}
@@ -65,7 +75,6 @@ def compute_diff(current_squad: list[dict], new_squad: list[dict], bank: int,
     in_ids = [pid for pid in new_by_id if pid not in cur_by_id]
 
     def _ep(pid: int):
-        """FIX T9: projected EP for a diff entry, or None when not in the map."""
         if ep_by_player is not None and pid in ep_by_player:
             return round(float(ep_by_player[pid]), 2)
         return None
@@ -88,20 +97,16 @@ def compute_diff(current_squad: list[dict], new_squad: list[dict], bank: int,
     total_cost_after = sum(p["now_cost"] for p in new_squad)
     transfers = max(len(in_ids), len(out_ids))
     if chip_covers:
-        free_used = 0            # wildcard/free hit does not consume the bank
-        bank_after = bank        # bank carries over unchanged
+        free_used = 0            # wildcard/free hit does not consume free transfers
+        bank_after = bank        # and keeps the ones saved
         penalty = 0
     else:
         free_used = min(transfers, bank)
-        bank_after = max(1, bank - transfers)   # FPL floor: bank never below 1
+        bank_after = max(0, bank - transfers)   # left this gameweek
         penalty = 4 * max(0, transfers - bank)
-    # FIX T1: money the user actually has after the transfers. Selling a risen
-    # player pays less than their current price — the fee (now − sell) is
-    # destroyed value, so it comes OFF the naive 1000 − Σ new view. (The spec
-    # snippet wrote "+ fee_sum", but its own feasibility math — "a strictly
-    # tighter constraint", solver check total + in − out + fee ≤ 1000 —
-    # requires minus; plus would make fee-bearing sales look richer.)
-    fee_sum = sum(cur_by_id[t["player_id"]]["now_cost"] - t["sell_value"] for t in transfers_out)
+    money_known = bank_money is not None
+    money_before = bank_money if money_known else bank_money_estimate(current_squad)
+    money_after = money_before - cost_delta
     return {
         "transfers_in": transfers_in,
         "transfers_out": transfers_out,
@@ -111,18 +116,18 @@ def compute_diff(current_squad: list[dict], new_squad: list[dict], bank: int,
         "bank_after": bank_after,
         "penalty_points": penalty,
         "chip_covers": bool(chip_covers),
+        "chip_played": chip_played,
         "bank_before": bank,
-        "budget_before": BUDGET_TOTAL - sum(p["now_cost"] for p in current_squad),
-        "budget_after": BUDGET_TOTAL - total_cost_after - fee_sum,
+        "budget_before": money_before,
+        "budget_after": money_after,
+        "money_known": money_known,
     }
 
 
 def freehit_played_in(gw: int | None) -> bool:
     """True when a Free Hit was played in gameweek ``gw`` (chip_plays_log).
 
-    Team-level fact, deliberately NOT scoped to a lineup id: the manual
-    chip-play endpoint logs lineup_id = NULL and apply-time logging uses the
-    generating lineup's id, which goes stale on re-import.
+    Team-level fact, deliberately NOT scoped to a lineup id.
     """
     if gw is None:
         return False
@@ -131,218 +136,251 @@ def freehit_played_in(gw: int | None) -> bool:
     ) is not None
 
 
-def chip_covers_transfers(chips: dict | None, target_gw: int | None) -> bool:
-    """True when a wildcard or free-hit is playable for the target GW — in that
-    GW the transfer count is unlimited (no penalty, no 20-transfer cap).
+def chips_logged_in(gw: int | None) -> list[str]:
+    """Chips recorded as played in gameweek ``gw``."""
+    if gw is None:
+        return []
+    return [r["chip"] for r in query("SELECT chip FROM chip_plays_log WHERE gw = ? ORDER BY id", (gw,))]
 
-    A Free Hit played in the previous GW bans the Free Hit (chip_plays_log,
-    checked by gameweek — the ban is a team-level fact, not per lineup row).
-    """
-    chips = chips or {}
-    if chips.get("wildcard", 0) <= 0 and chips.get("freehit", 0) <= 0:
+
+def chip_window_covers(chip: str, gw: int | None) -> bool:
+    """True when one of the chip's sets (from the API's chips[]) is playable in ``gw``."""
+    if gw is None:
         return False
-    windows = {w["chip"]: w for w in season_svc.active_chip_windows()}
-    for chip in ("wildcard", "freehit"):
-        if chips.get(chip, 0) <= 0:
-            continue
-        w = windows.get(chip)
-        if not (w and w.get("playable_next_gw")):
-            continue
-        if chip == "freehit" and freehit_played_in(target_gw - 1):
-            continue
-        return True
-    return False
+    return query_one(
+        "SELECT 1 AS x FROM chips WHERE name = ? AND start_event <= ? AND stop_event >= ?",
+        (chip, gw, gw),
+    ) is not None
+
+
+def chip_play_problem(chip: str, chips: dict | None, gw: int | None) -> str | None:
+    """Why ``chip`` cannot be played in ``gw`` (None = it can)."""
+    chips = chips or {}
+    label = CHIP_LABELS.get(chip)
+    if label is None:
+        return f"unknown chip {chip!r}"
+    if int(chips.get(chip, 0) or 0) <= 0:
+        return f"no {label} sets remaining"
+    if not chip_window_covers(chip, gw):
+        return f"no {label} window covers GW{gw}"
+    if chip == "freehit" and gw is not None and freehit_played_in(gw - 1):
+        return f"a Free Hit cannot follow a Free Hit GW (one was played in GW{gw - 1})"
+    other = [c for c in chips_logged_in(gw) if c != chip]
+    if other:
+        return (f"{CHIP_LABELS.get(other[0], other[0])} is already logged for GW{gw}: "
+                "only one chip per gameweek")
+    return None
+
+
+def chip_covers_transfers(chips: dict | None, target_gw: int | None,
+                          chip: str | None = None) -> bool:
+    """True when the user plays a Wildcard or Free Hit (``chip``) in the target
+    GW and is allowed to: transfers are then unlimited (no penalty, no cap).
+
+    Holding a chip is not playing it — without ``chip`` this is False.
+    """
+    if chip not in TRANSFER_CHIPS:
+        return False
+    return chip_play_problem(chip, chips, target_gw) is None
+
+
+def _enforce_one_chip(advice: list[dict], values: dict[str, float]) -> list[dict]:
+    """FPL allows one chip per gameweek: keep the single most valuable "use"
+    and turn any other "use" into "consider"."""
+    uses = [a for a in advice if a["recommendation"] == "use"]
+    if len(uses) <= 1:
+        return advice
+    keep = max(uses, key=lambda a: values.get(a["chip"], 0.0))
+    for a in uses:
+        if a is not keep:
+            a["recommendation"] = "consider"
+            a["reason"] += f" (only one chip per gameweek; {CHIP_LABELS[keep['chip']]} is worth more)"
+    return advice
+
+
+def _committed(advice: list[dict], chip: str, gw: int | None, why: str) -> list[dict]:
+    """A chip is planned/logged for the GW: it is the one chip; others skip."""
+    label = CHIP_LABELS.get(chip, chip)
+    out = []
+    for a in advice:
+        if a["chip"] == chip:
+            out.append({"chip": chip, "recommendation": "use", "reason": why})
+        else:
+            out.append({"chip": a["chip"], "recommendation": "skip",
+                        "reason": f"one chip per gameweek: {label} is planned for GW{gw}"})
+    return out
 
 
 def chip_advice_v1(diff: dict, chips: dict | None, current_gw: int | None,
                    next_gw: int | None, cfg) -> list[dict]:
-    """Chip advice v1 (M1): window guard + wildcard/free-hit by transfer count,
-    triple-captain by captain EP. v2 (M4 T4.2) adds Free-Hit consecutive ban,
-    BB strength, 3XC+WC interplay.
-    """
+    """Chip advice v1 (fallback when no solved lineup is available): window
+    guard + wildcard/free-hit by transfer count. One chip per GW enforced."""
     advice: list[dict] = []
     chips = chips or {}
-    windows = {w["chip"]: w for w in season_svc.active_chip_windows()}
+    gw = next_gw or current_gw
     transfers = max(len(diff["transfers_in"]), len(diff["transfers_out"]))
-    # A22: compute_diff always writes bank_before; a diff without it is a
-    # legacy row — fail loudly instead of guessing wrong bank arithmetic.
-    bank_before = diff["bank_before"]
+    bank_before = diff["bank_before"]   # A22: required — a legacy diff fails loudly
 
-    def window_open(chip: str) -> bool:
-        w = windows.get(chip)
-        return bool(w and w.get("playable_next_gw"))
-
-    # WILDCARD
-    w_left = chips.get("wildcard", 0)
-    if not window_open("wildcard"):
-        advice.append({"chip": "wildcard", "recommendation": "skip",
-                       "reason": "no active wildcard window covers the next GW"})
-    elif w_left <= 0:
-        advice.append({"chip": "wildcard", "recommendation": "skip",
-                       "reason": "no wildcard sets remaining"})
-    elif transfers > bank_before:
-        advice.append({"chip": "wildcard", "recommendation": "use",
-                       "reason": f"{transfers} transfers vs bank of {bank_before} — wildcard makes them all free"})
-    else:
-        advice.append({"chip": "wildcard", "recommendation": "skip",
-                       "reason": f"{transfers} transfers fit in the bank of {bank_before}"})
-
-    # FREE HIT
-    f_left = chips.get("freehit", 0)
-    if not window_open("freehit"):
-        advice.append({"chip": "freehit", "recommendation": "skip",
-                       "reason": "no active free-hit window covers the next GW"})
-    elif f_left <= 0:
-        advice.append({"chip": "freehit", "recommendation": "skip",
-                       "reason": "no free-hit sets remaining"})
-    elif transfers > bank_before:
-        advice.append({"chip": "freehit", "recommendation": "consider",
-                       "reason": f"{transfers} transfers vs bank of {bank_before} — free hit avoids the "
-                                 f"-{4 * max(0, transfers - bank_before)} pt penalty (cannot follow a Free Hit GW)"})
-    else:
-        advice.append({"chip": "freehit", "recommendation": "skip",
-                       "reason": f"{transfers} transfers fit in the bank of {bank_before}"})
-
-    # TRIPLE CAPTAIN
-    t_left = chips.get("triple_captain", 0)
-    if not window_open("triple_captain"):
-        advice.append({"chip": "triple_captain", "recommendation": "skip",
-                       "reason": "no active triple-captain window covers the next GW"})
-    elif t_left <= 0:
-        advice.append({"chip": "triple_captain", "recommendation": "skip",
-                       "reason": "no triple-captain sets remaining"})
-    else:
-        advice.append({"chip": "triple_captain", "recommendation": "consider",
-                       "reason": "evaluate captain choice — 3XC doubles a strong captain (see card)"})
-
-    # BENCH BOOST
-    b_left = chips.get("bboost", 0)
-    if not window_open("bboost"):
-        advice.append({"chip": "bboost", "recommendation": "skip",
-                       "reason": "no active bench-boost window covers the next GW"})
-    elif b_left <= 0:
-        advice.append({"chip": "bboost", "recommendation": "skip",
-                       "reason": "no bench-boost sets remaining"})
-    else:
-        advice.append({"chip": "bboost", "recommendation": "consider",
-                       "reason": "bench boost pays 1 pt per appearance — use on a GW with deep bench minutes"})
-
-    return advice
+    for chip in TRANSFER_CHIPS:
+        label = CHIP_LABELS[chip]
+        if not chip_window_covers(chip, gw):
+            advice.append({"chip": chip, "recommendation": "skip",
+                           "reason": f"no active {label.lower()} window covers GW{gw}"})
+        elif chips.get(chip, 0) <= 0:
+            advice.append({"chip": chip, "recommendation": "skip",
+                           "reason": f"no {label.lower()} sets remaining"})
+        elif transfers > bank_before:
+            advice.append({"chip": chip, "recommendation": "use" if chip == "wildcard" else "consider",
+                           "reason": f"{transfers} transfers vs {bank_before} free — a {label} makes them all free"})
+        else:
+            advice.append({"chip": chip, "recommendation": "skip",
+                           "reason": f"{transfers} transfers fit in your {bank_before} free"})
+    for chip in ("triple_captain", "bboost"):
+        label = CHIP_LABELS[chip]
+        if not chip_window_covers(chip, gw):
+            advice.append({"chip": chip, "recommendation": "skip",
+                           "reason": f"no active {label.lower()} window covers GW{gw}"})
+        elif chips.get(chip, 0) <= 0:
+            advice.append({"chip": chip, "recommendation": "skip",
+                           "reason": f"no {label.lower()} sets remaining"})
+        else:
+            advice.append({"chip": chip, "recommendation": "consider",
+                           "reason": "no projection available — check the captain and bench"})
+    logged = chips_logged_in(gw)
+    played = diff.get("chip_played") or (logged[0] if logged else None)
+    if played:
+        return _committed(advice, played, gw, f"{CHIP_LABELS.get(played, played)} is planned for GW{gw}")
+    return _enforce_one_chip(advice, {"wildcard": 4.0 * max(0, transfers - bank_before)})
 
 
 def chip_advice_v2(diff: dict, chips: dict | None, solved, current_gw: int | None,
-                   next_gw: int | None, cfg, signals: dict | None = None) -> list[dict]:
-    """Full chip logic (M4 T4.2): window gating, wildcard / free-hit by transfer
-    count, Free-Hit consecutive-GW ban, triple-captain by captain EP + confirmed
-    starter, bench-boost by bench strength. Falls back to v1 when called without
-    a solved lineup (no EP data).
+                   next_gw: int | None, cfg, signals: dict | None = None,
+                   chip_gains: dict | None = None) -> list[dict]:
+    """Full chip logic (M4 T4.2; v1.0 rules pass): window gating, sets
+    remaining, Free-Hit consecutive ban, triple captain by captain EP +
+    confirmed starter, bench boost by bench projection, wildcard / free hit by
+    the projected gain of a rebuild (``chip_gains``, from an extra solve), and
+    at most one "use" per gameweek.
 
     `solved` is a SolvedLineup (carries universe EPs, xi, captain, bench).
     `signals` maps player_id → list of active signal dicts.
     """
     chips = chips or {}
     signals = signals or {}
-    windows = {w["chip"]: w for w in season_svc.active_chip_windows()}
+    chip_gains = chip_gains or {}
+    gw = next_gw or current_gw
     transfers = max(len(diff["transfers_in"]), len(diff["transfers_out"]))
-    # A22: bank_before is required (see chip_advice_v1) — no fallback guess.
-    bank_before = diff["bank_before"]
+    bank_before = diff["bank_before"]   # A22: required — a legacy diff fails loudly
 
-    # EP data from the solved lineup (universe carries precomputed ep).
     universe = getattr(solved, "universe", None) or []
     ep = {p["id"]: p.get("ep", 0.0) for p in universe}
     xi_ids = list(getattr(solved, "xi", []) or [])
     bench_ids = list(getattr(solved, "bench", []) or [])
     cap_id = getattr(solved, "captain", None)
-    xi_eps = [ep.get(i, 0.0) for i in xi_ids]
-    bench_eps = [ep.get(i, 0.0) for i in bench_ids]
-    xi_avg = sum(xi_eps) / len(xi_eps) if xi_eps else 0.0
-    bench_sum = sum(bench_eps)
+    bench_sum = sum(ep.get(i, 0.0) for i in bench_ids)
     cap_ep = ep.get(cap_id, 0.0) if cap_id is not None else 0.0
-    cap_signals = signals.get(cap_id, []) if cap_id is not None else []
     cap_confirmed = any(
         s.get("sentiment") == "positive" and s.get("category") == "selection"
-        and s.get("confidence", 0) >= 0.7 for s in cap_signals
-    )
+        and s.get("confidence", 0) >= 0.7 for s in signals.get(cap_id, []) or []
+    ) if cap_id is not None else False
 
-    def window_open(chip: str) -> bool:
-        w = windows.get(chip)
-        return bool(w and w.get("playable_next_gw"))
-
-    def remaining(chip: str) -> int:
-        return int(chips.get(chip, 0) or 0)
+    def gate(chip: str) -> dict | None:
+        label = CHIP_LABELS[chip]
+        if not chip_window_covers(chip, gw):
+            return {"chip": chip, "recommendation": "skip",
+                    "reason": f"no active {label.lower()} window covers GW{gw}"}
+        if int(chips.get(chip, 0) or 0) <= 0:
+            return {"chip": chip, "recommendation": "skip",
+                    "reason": f"no {label.lower()} sets remaining"}
+        return None
 
     advice: list[dict] = []
+    values: dict[str, float] = {}
 
     # WILDCARD
-    if not window_open("wildcard"):
-        advice.append({"chip": "wildcard", "recommendation": "skip",
-                       "reason": "no active wildcard window covers the next GW"})
-    elif remaining("wildcard") <= 0:
-        advice.append({"chip": "wildcard", "recommendation": "skip",
-                       "reason": "no wildcard sets remaining"})
-    elif transfers > bank_before:
-        advice.append({"chip": "wildcard", "recommendation": "use",
-                       "reason": f"{transfers} transfers vs bank of {bank_before} — wildcard makes them all free and retains the bank"})
-    elif bank_before <= 1 and transfers >= 4:
-        advice.append({"chip": "wildcard", "recommendation": "consider",
-                       "reason": f"{transfers} transfers fit the bank of {bank_before}, but a wildcard frees future options"})
-    else:
-        advice.append({"chip": "wildcard", "recommendation": "skip",
-                       "reason": f"{transfers} transfers fit in the bank of {bank_before}"})
+    a = gate("wildcard")
+    if a is None:
+        gain = chip_gains.get("wildcard")
+        if transfers > bank_before:
+            values["wildcard"] = 4.0 * (transfers - bank_before)
+            a = {"chip": "wildcard", "recommendation": "use",
+                 "reason": f"{transfers} transfers vs {bank_before} free — a Wildcard makes them all "
+                           f"free (saves {4 * (transfers - bank_before)} points) and keeps your free transfers"}
+        elif gain is not None and gain >= WC_CONSIDER_GAIN:
+            values["wildcard"] = gain
+            a = {"chip": "wildcard", "recommendation": "consider",
+                 "reason": f"a full rebuild projects +{gain:.1f} points this gameweek; "
+                           "a Wildcard also sets up the weeks after"}
+        elif gain is not None:
+            a = {"chip": "wildcard", "recommendation": "skip",
+                 "reason": f"a full rebuild projects only +{gain:.1f} points this gameweek — save it"}
+        else:
+            a = {"chip": "wildcard", "recommendation": "skip",
+                 "reason": f"{transfers} transfers fit in your {bank_before} free"}
+    advice.append(a)
 
-    # FREE HIT (same trigger as wildcard + consecutive-GW ban)
-    prev_gw = (next_gw or current_gw) - 1 if (next_gw or current_gw) else None
-    fh_played_prev = freehit_played_in(prev_gw)
-    if not window_open("freehit"):
-        advice.append({"chip": "freehit", "recommendation": "skip",
-                       "reason": "no active free-hit window covers the next GW"})
-    elif remaining("freehit") <= 0:
-        advice.append({"chip": "freehit", "recommendation": "skip",
-                       "reason": "no free-hit sets remaining"})
-    elif fh_played_prev:
-        advice.append({"chip": "freehit", "recommendation": "skip",
-                       "reason": f"cannot follow a Free Hit GW (one was played in GW {prev_gw})"})
-    elif transfers > bank_before:
-        advice.append({"chip": "freehit", "recommendation": "consider",
-                       "reason": f"{transfers} transfers vs bank of {bank_before} — free hit avoids the "
-                                 f"-{4 * max(0, transfers - bank_before)} pt penalty"})
-    else:
-        advice.append({"chip": "freehit", "recommendation": "skip",
-                       "reason": f"{transfers} transfers fit in the bank of {bank_before}"})
+    # FREE HIT (+ consecutive-GW ban)
+    a = gate("freehit")
+    if a is None:
+        gain = chip_gains.get("freehit", chip_gains.get("wildcard"))
+        if gw is not None and freehit_played_in(gw - 1):
+            a = {"chip": "freehit", "recommendation": "skip",
+                 "reason": f"cannot follow a Free Hit GW (one was played in GW {gw - 1})"}
+        elif transfers > bank_before:
+            a = {"chip": "freehit", "recommendation": "consider",
+                 "reason": f"{transfers} transfers vs {bank_before} free — a Free Hit avoids the "
+                           f"-{4 * (transfers - bank_before)} pt penalty (your squad returns next GW)"}
+        elif gain is not None and gain >= FH_CONSIDER_GAIN:
+            values["freehit"] = gain
+            a = {"chip": "freehit", "recommendation": "consider",
+                 "reason": f"a one-week rebuild projects +{gain:.1f} points; your squad returns next GW"}
+        else:
+            reason = (f"a one-week rebuild projects only +{gain:.1f} points — save it"
+                      if gain is not None else f"{transfers} transfers fit in your {bank_before} free")
+            a = {"chip": "freehit", "recommendation": "skip", "reason": reason}
+    advice.append(a)
 
     # TRIPLE CAPTAIN
-    if not window_open("triple_captain"):
-        advice.append({"chip": "triple_captain", "recommendation": "skip",
-                       "reason": "no active triple-captain window covers the next GW"})
-    elif remaining("triple_captain") <= 0:
-        advice.append({"chip": "triple_captain", "recommendation": "skip",
-                       "reason": "no triple-captain sets remaining"})
-    elif cap_ep >= 8.5 or (cap_confirmed and cap_ep >= 7.0):
-        reason = f"captain EP {cap_ep:.1f}"
-        if cap_confirmed:
-            reason += " with a confirmed-starter signal"
-        if advice[0]["recommendation"] == "use":
-            reason += " (3XC + Wildcard in the same GW is legal but rarely optimal)"
-        advice.append({"chip": "triple_captain", "recommendation": "use", "reason": reason})
-    elif cap_ep >= 7.0:
-        advice.append({"chip": "triple_captain", "recommendation": "consider",
-                       "reason": f"captain EP {cap_ep:.1f} is worth a 3× look"})
-    else:
-        advice.append({"chip": "triple_captain", "recommendation": "skip",
-                       "reason": f"captain EP {cap_ep:.1f} is too low for 3×"})
+    a = gate("triple_captain")
+    if a is None:
+        values["triple_captain"] = cap_ep
+        if cap_ep >= TC_USE_EP or (cap_confirmed and cap_ep >= TC_CONSIDER_EP):
+            reason = f"captain projects {cap_ep:.1f}: Triple Captain adds another {cap_ep:.1f}"
+            if cap_confirmed:
+                reason += " (confirmed-starter signal)"
+            a = {"chip": "triple_captain", "recommendation": "use", "reason": reason}
+        elif cap_ep >= TC_CONSIDER_EP:
+            a = {"chip": "triple_captain", "recommendation": "consider",
+                 "reason": f"captain projects {cap_ep:.1f}: worth a look, below the {TC_USE_EP} bar"}
+        else:
+            a = {"chip": "triple_captain", "recommendation": "skip",
+                 "reason": f"captain projects {cap_ep:.1f}, too low for Triple Captain"}
+    advice.append(a)
 
     # BENCH BOOST
-    if not window_open("bboost"):
-        advice.append({"chip": "bboost", "recommendation": "skip",
-                       "reason": "no active bench-boost window covers the next GW"})
-    elif remaining("bboost") <= 0:
-        advice.append({"chip": "bboost", "recommendation": "skip",
-                       "reason": "no bench-boost sets remaining"})
-    elif bench_sum >= 0.5 * xi_avg:
-        advice.append({"chip": "bboost", "recommendation": "consider",
-                       "reason": f"bench EP {bench_sum:.1f} ≥ 0.5× XI avg ({xi_avg:.1f}) — a strong bench makes the 1-pt appearances worthwhile"})
-    else:
-        advice.append({"chip": "bboost", "recommendation": "skip",
-                       "reason": f"bench EP {bench_sum:.1f} is below 0.5× XI avg ({xi_avg:.1f})"})
+    a = gate("bboost")
+    if a is None:
+        values["bboost"] = bench_sum
+        if bench_sum >= BB_USE_BENCH:
+            a = {"chip": "bboost", "recommendation": "use",
+                 "reason": f"your bench projects {bench_sum:.1f} points"}
+        elif bench_sum >= BB_CONSIDER_BENCH:
+            a = {"chip": "bboost", "recommendation": "consider",
+                 "reason": f"your bench projects {bench_sum:.1f} points (use it at {BB_USE_BENCH:.0f}+)"}
+        else:
+            a = {"chip": "bboost", "recommendation": "skip",
+                 "reason": f"your bench projects only {bench_sum:.1f} points"}
+    advice.append(a)
 
-    return advice
+    logged = chips_logged_in(gw)
+    played = diff.get("chip_played")
+    if played:
+        why = {"wildcard": "unlimited free transfers this gameweek; your free transfers are kept",
+               "freehit": "unlimited free transfers for one week; your squad returns next gameweek",
+               "bboost": f"your bench scores too: +{bench_sum:.1f} projected",
+               "triple_captain": f"captain counts three times: +{cap_ep:.1f} projected"}.get(played, "")
+        return _committed(advice, played, gw, f"You chose to play {CHIP_LABELS[played]}: {why}")
+    if logged:
+        return _committed(advice, logged[0], gw,
+                          f"{CHIP_LABELS.get(logged[0], logged[0])} is logged as played for GW{gw}")
+    return _enforce_one_chip(advice, values)

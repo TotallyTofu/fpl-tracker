@@ -3,8 +3,14 @@
 Every fetcher goes through ``ingest_item`` — no direct ``raw_items`` writes
 elsewhere. Dedupe key is (source, content_hash) where content_hash covers
 source + normalized title + first 2000 chars of body, so the same story with
-a new URL still dedupes (title-only stability) while a title change counts as
-a new item.
+a new URL still dedupes (title-only stability).
+
+v1.0: for feed sources (BBC, ESPN, Reddit, YouTube) the source's own item id
+(``external_id``) is checked first. A Reddit thread's body includes its top
+comments, so every poll after a new comment used to store the thread again
+(168 rows for 124 posts); now the existing row is kept and only a missing
+``published_at`` is filled in. Official FPL news keeps content-hash dedupe:
+each news change for a player is a new item by design.
 """
 from __future__ import annotations
 
@@ -17,6 +23,8 @@ from datetime import datetime, timezone
 from ..db import execute, now_utc, query, query_one
 
 _BODY_LIMIT = 200_000  # transcripts ~75 KB are fine; hard cap at storage
+# Sources whose external_id identifies one story/thread/video across polls.
+_ID_DEDUPE_SOURCES = ("bbc", "espn", "reddit", "youtube")
 
 
 def content_hash(source: str, title: str | None, body: str | None) -> str:
@@ -40,8 +48,9 @@ def parse_published(raw: str | None) -> str | None:
         )
     s = str(raw).strip()
     try:
-        if s.isdigit():
-            dt = datetime.fromtimestamp(int(s), tz=timezone.utc)
+        # epoch seconds, including Reddit JSON's float form ("1791209205.0")
+        if s.replace(".", "", 1).isdigit():
+            dt = datetime.fromtimestamp(int(float(s)), tz=timezone.utc)
             return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         iso = s.replace("Z", "+00:00")
         dt = datetime.fromisoformat(iso)
@@ -67,6 +76,16 @@ def ingest_item(
     New items are stored with ``processed=0`` (extraction queue).
     """
     pub = parse_published(published_at)
+    if source in _ID_DEDUPE_SOURCES and external_id:
+        existing = query_one(
+            "SELECT id, published_at FROM raw_items WHERE source = ? AND external_id = ? "
+            "ORDER BY id LIMIT 1",
+            (source, external_id),
+        )
+        if existing:
+            if existing["published_at"] is None and pub:
+                execute("UPDATE raw_items SET published_at = ? WHERE id = ?", (pub, existing["id"]))
+            return None
     stored_body = body[:_BODY_LIMIT] if body else None
     h = content_hash(source, title, body)
     rowid = execute(

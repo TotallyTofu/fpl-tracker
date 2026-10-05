@@ -7,6 +7,7 @@ from app import db as dbmod
 from app.signals import ingest, store
 
 NOW = "2026-09-19T12:00:00Z"
+from conftest import RECENT  # noqa: E402
 
 
 def test_parse_published_formats():
@@ -61,7 +62,7 @@ def _sig(pid=1, cat="injury", sent="negative", conf=0.5, src="bbc:x1",
     )
     return {
         "player_id": pid, "category": cat, "sentiment": sent, "confidence": conf,
-        "summary": summary, "source": src, "url": "http://x", "published_at": NOW,
+        "summary": summary, "source": src, "url": "http://x", "published_at": RECENT,
         "raw_item_id": 1, "model": "rules",
     }
 

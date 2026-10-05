@@ -96,10 +96,10 @@ def test_captain_and_vc_same_player():
 
 
 def test_bank_range():
-    c = validate_lineup(valid_squad(), bank=0)
-    assert "BANK_RANGE" in codes(c)
-    c = validate_lineup(valid_squad(), bank=6)
-    assert "BANK_RANGE" in codes(c)
+    # v1.0: 0 is valid (this week's free transfer already used)
+    assert "BANK_RANGE" not in codes(validate_lineup(valid_squad(), bank=0))
+    assert "BANK_RANGE" in codes(validate_lineup(valid_squad(), bank=-1))
+    assert "BANK_RANGE" in codes(validate_lineup(valid_squad(), bank=6))
 
 
 def test_chip_range():

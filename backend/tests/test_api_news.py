@@ -9,6 +9,7 @@ from app.main import create_app
 from app.signals import ingest, store
 
 NOW = "2026-09-19T12:00:00Z"
+from conftest import RECENT  # noqa: E402
 
 
 @pytest.fixture()
@@ -25,7 +26,7 @@ def _seed(client):
         {
             "player_id": 1, "category": "injury", "sentiment": "negative",
             "confidence": 0.5, "summary": "Goal One ruled out with hamstring injury.",
-            "source": "bbc:x1", "url": "http://example.com/a", "published_at": NOW,
+            "source": "bbc:x1", "url": "http://example.com/a", "published_at": RECENT,
             "raw_item_id": item_id, "model": "rules",
         }
     ])
@@ -57,7 +58,7 @@ def test_signals_filters(client):
     store.save_signals([
         {"player_id": 3, "category": "selection", "sentiment": "negative",
          "confidence": 0.4, "summary": "Def A One a doubt.", "source": "espn:9",
-         "url": None, "published_at": NOW, "raw_item_id": None, "model": "rules"},
+         "url": None, "published_at": RECENT, "raw_item_id": None, "model": "rules"},
     ])
     assert client.get("/api/signals", params={"player_id": 1}).json()["count"] == 1
     assert client.get("/api/signals", params={"category": "selection"}).json()["count"] == 1
@@ -71,10 +72,10 @@ def test_signals_inactive_team_filter(client):
     store.save_signals([
         {"player_id": 1, "category": "injury", "sentiment": "negative",
          "confidence": 0.5, "summary": "Goal One ruled out.", "source": "bbc:x1",
-         "url": None, "published_at": NOW, "raw_item_id": None, "model": "rules"},
+         "url": None, "published_at": RECENT, "raw_item_id": None, "model": "rules"},
         {"player_id": 5, "category": "selection", "sentiment": "negative",
          "confidence": 0.4, "summary": "Def B One a doubt.", "source": "espn:9",
-         "url": None, "published_at": NOW, "raw_item_id": None, "model": "rules"},
+         "url": None, "published_at": RECENT, "raw_item_id": None, "model": "rules"},
     ])
     r = client.get("/api/signals", params={"active": False, "team": "ALP"})
     assert r.status_code == 200
@@ -161,10 +162,9 @@ def test_refresh_espn_disabled_skip(client, monkeypatch):
     from app.api import meta as meta_mod
     from app.config import ConfigFile
 
-    monkeypatch.setattr(
-        meta_mod, "load_settings",
-        lambda: types.SimpleNamespace(config=ConfigFile()),  # espn.enabled=False default
-    )
+    cfg = ConfigFile()
+    cfg.sources.espn.enabled = False   # on by default since v1.0
+    monkeypatch.setattr(meta_mod, "load_settings", lambda: types.SimpleNamespace(config=cfg))
     r = client.post("/api/refresh/espn")
     assert r.status_code == 200
     assert "disabled" in str(r.json()["results"]["espn"])

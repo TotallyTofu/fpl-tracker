@@ -3,6 +3,8 @@
 GET  /api/signals?player_id=&team=&category=&active=
 GET  /api/items?source=&kind=&limit=&offset=
 POST /api/items/{id}/fetch-body   (BBC on-demand article, D13)
+DELETE /api/signals/{id}          (v1.0: dismiss a wrong signal)
+POST /api/items/requeue-skipped   (v1.0: re-read items the LLM skipped)
 """
 from __future__ import annotations
 
@@ -81,6 +83,25 @@ async def clear_signals() -> dict:
     n = query_one("SELECT COUNT(*) AS n FROM signals")["n"]
     execute("DELETE FROM signals")
     return {"cleared": n}
+
+
+@router.delete("/signals/{signal_id}")
+async def dismiss_signal(signal_id: int) -> dict:
+    """v1.0: drop one signal the user judged wrong (wrong player, not news).
+    Items are processed once, so a dismissed signal does not come back."""
+    if not query_one("SELECT id FROM signals WHERE id = ?", (signal_id,)):
+        raise HTTPException(404, "signal not found")
+    execute("DELETE FROM signals WHERE id = ?", (signal_id,))
+    return {"dismissed": signal_id}
+
+
+@router.post("/items/requeue-skipped")
+async def requeue_skipped(days: int = 7) -> dict:
+    """v1.0: re-queue items marked done without the LLM while it was failing
+    (retrieved in the last ``days`` days); the next extraction pass reads them."""
+    from ..signals.pipeline import requeue_skipped as _requeue
+
+    return _requeue(max(1, min(days, 60)))
 
 
 @router.post("/items/{item_id}/fetch-body")

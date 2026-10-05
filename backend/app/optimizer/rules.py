@@ -2,6 +2,15 @@
 
 Used for BOTH user-entered lineups (strict=False: PLAYER_UNAVAILABLE is a warning)
 and solver output (strict=True: every error is fatal).
+
+Money: the £100.0m limit only binds a squad built from scratch. A real squad
+can be worth more after price rises, and what it can afford depends on the
+money in the bank, so for user lineups an over-£100m value is a warning; the
+solver enforces money itself (sell values + bank, see solver._TransferCtx).
+
+Bench: FPL keeps the substitute goalkeeper in his own slot; only the three
+outfield subs have a priority order. Here that is bench_order 1 = GK, 2-4 =
+outfield priority (the same numbering as FPL's picks 12-15).
 """
 from __future__ import annotations
 
@@ -55,9 +64,11 @@ def validate_lineup(players: list[dict], bank: int, chips: dict | None = None,
                            + ", ".join(comp_msgs) + ")"))
 
     total = sum(p["now_cost"] for p in players)
-    if total > BUDGET:
+    if total > BUDGET and not strict:
         errors.append(_err("BUDGET_EXCEEDED",
-                           f"Squad costs £{total / 10:.1f}m (max £100.0m)"))
+                           f"Squad is worth £{total / 10:.1f}m, over the £100.0m starting budget. "
+                           "That is fine for a real team whose players have risen in price.",
+                           severity="warning"))
 
     club_counts: dict[int, int] = {}
     for p in players:
@@ -73,6 +84,11 @@ def validate_lineup(players: list[dict], bank: int, chips: dict | None = None,
     orders = sorted(b.get("bench_order") for b in bench if b.get("bench_order") is not None)
     if len(bench) == 4 and orders != [1, 2, 3, 4]:
         errors.append(_err("BENCH_ORDER", "Bench orders must be 1–4, unique"))
+    bench_gks = [b for b in bench if b["element_type"] == 1]
+    if len(bench) == 4 and len(bench_gks) == 1 and bench_gks[0].get("bench_order") != 1:
+        errors.append(_err("BENCH_GK_SLOT",
+                           "The substitute goalkeeper must be in the first bench slot "
+                           "(only the three outfield subs have a priority order)"))
 
     scounts: dict[int, int] = {}
     for p in starters:
@@ -99,8 +115,8 @@ def validate_lineup(players: list[dict], bank: int, chips: dict | None = None,
         if caps and caps[0]["player_id"] == vcs[0]["player_id"]:
             errors.append(_err("CAPTAIN_VC_SAME", "Captain and vice-captain must be distinct players"))
 
-    if not (1 <= bank <= 5):
-        errors.append(_err("BANK_RANGE", f"Free-transfer bank must be 1–5 (got {bank})"))
+    if not (0 <= bank <= 5):
+        errors.append(_err("BANK_RANGE", f"Free transfers must be 0–5 (got {bank})"))
 
     for chip_name, cnt in (chips or {}).items():
         if not (0 <= cnt <= 2):

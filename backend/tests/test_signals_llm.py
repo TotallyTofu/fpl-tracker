@@ -134,6 +134,7 @@ def _patch_http(monkeypatch):
     _FakeClient.post_content = '{"signals": []}'
     _FakeClient.post_status = 200
     llm._json_mode_ok = None  # FIX N4: reset the capability cache
+    llm._template_kwargs_ok = None
     monkeypatch.setattr(llm.httpx, "AsyncClient", _FakeClient)
 
 
@@ -521,6 +522,8 @@ def test_test_llm_connection_ok_reply(db_path, monkeypatch):
 def test_relevant_players_truncation_keeps_top_selected_and_warns(monkeypatch, caplog):
     """A23: when more players are named than MAX_LIST_PLAYERS, the cap keeps
     the highest selected_by_percent and the truncation is logged."""
+    # the truncation mechanism, tested at the original 40 cap
+    monkeypatch.setattr(llm, "MAX_LIST_PLAYERS", 40)
     players = [
         {"id": i, "web_name": f"Player {i}", "selected_by_percent": float(i)}
         for i in range(1, 46)  # 45 named players > MAX_LIST_PLAYERS (40)
@@ -560,6 +563,8 @@ def test_truncation_keeps_top_owned_through_pipeline_player_list(db_path, monkey
     column. It did not — pipeline._player_list() omitted it, every sort key was
     0.0, and the "top by ownership" promise was a silent no-op (the unit tests
     above pass a synthetic list that happens to include the field)."""
+    # the truncation mechanism, tested at the original 40 cap
+    monkeypatch.setattr(llm, "MAX_LIST_PLAYERS", 40)
     from app import db as dbmod
     from app.signals import names as names_mod
     from app.signals import pipeline
@@ -587,3 +592,22 @@ def test_truncation_keeps_top_owned_through_pipeline_player_list(db_path, monkey
     # the 40 highest-owned (Zed00..Zed39, ownership 45..6) survive the cap
     assert {p["id"] for p in out} == {900 + i for i in range(40)}
     assert any("truncated" in r.getMessage() for r in caplog.records)
+
+def test_thinking_is_switched_off_by_default():
+    """v1.0: thinking models spent 60k+ chars reasoning and hit the output cap
+    before answering; the request asks the chat template to skip thinking."""
+    asyncio.run(extract_signals_llm("Goal One injured.", "bbc", None, PLAYERS,
+                                    _settings(player_list_mode="full")))
+    body = _FakeClient.calls[0]["json"]
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_thinking_switch_can_be_disabled():
+    asyncio.run(extract_signals_llm("Goal One injured.", "bbc", None, PLAYERS,
+                                    _settings(disable_thinking=False, player_list_mode="full")))
+    assert "chat_template_kwargs" not in _FakeClient.calls[0]["json"]
+
+
+def test_prompt_excludes_international_and_price_noise():
+    assert "national squad" in llm.SYSTEM_PROMPT
+    assert "Price changes" in llm.SYSTEM_PROMPT

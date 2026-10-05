@@ -31,10 +31,11 @@ def _row(item_id: int) -> dict:
     return dbmod.query_one("SELECT * FROM raw_items WHERE id = ?", (item_id,))
 
 
-def test_llm_none_requeues_and_saves_rule_signals(db_path, monkeypatch):
-    """§18.6 (FIX N10): a hard LLM failure (None) increments
-    extract_attempts and leaves the item pending — the rule signals are saved
-    on every attempt. After MAX_EXTRACT_ATTEMPTS the item is marked processed."""
+def test_llm_none_requeues_then_falls_back_to_rules(db_path, monkeypatch):
+    """§18.6 (FIX N10), v1.0: a hard LLM failure (None) increments
+    extract_attempts and leaves the item pending WITHOUT keyword signals (the
+    next attempt may still read it properly). After MAX_EXTRACT_ATTEMPTS the
+    keyword fallback runs and the item is marked processed."""
     item_id = _item("retry1")
 
     async def failing_llm(*a, **k):
@@ -42,9 +43,8 @@ def test_llm_none_requeues_and_saves_rule_signals(db_path, monkeypatch):
 
     monkeypatch.setattr(pipeline, "extract_signals_llm", failing_llm)
     n = asyncio.run(pipeline.process_item(_row(item_id), _settings()))
-    assert n >= 1                       # the rule signal was still saved
-    sig = dbmod.query_one("SELECT * FROM signals WHERE player_id = 1 AND category = 'injury'")
-    assert sig is not None
+    assert n == 0
+    assert dbmod.query_one("SELECT * FROM signals WHERE player_id = 1") is None
     row = _row(item_id)
     assert row["extract_attempts"] == 1
     assert row["processed"] == 0        # requeued, not lost
@@ -54,6 +54,24 @@ def test_llm_none_requeues_and_saves_rule_signals(db_path, monkeypatch):
     row = _row(item_id)
     assert row["extract_attempts"] == pipeline.MAX_EXTRACT_ATTEMPTS
     assert row["processed"] == 1        # gave up — but never silently lost
+    sig = dbmod.query_one("SELECT * FROM signals WHERE player_id = 1 AND category = 'injury'")
+    assert sig is not None and sig["model"] == "rules"
+    assert "Keyword match only" in (row["takeaways"] or "")
+
+
+def test_llm_success_stores_no_keyword_signals(db_path, monkeypatch):
+    """v1.0: when the LLM reads the item, only its signals are stored — the
+    keyword extractor used to add contradicting signals from the same text."""
+    item_id = _item("llm1")
+
+    async def ok_llm(*a, **k):
+        return [{"player_id": 1, "category": "return", "sentiment": "positive",
+                 "confidence": 0.8, "summary": "Goal One is back."}]
+
+    monkeypatch.setattr(pipeline, "extract_signals_llm", ok_llm)
+    asyncio.run(pipeline.process_item(_row(item_id), _settings()))
+    models = {r["model"] for r in dbmod.query("SELECT model FROM signals WHERE player_id = 1")}
+    assert models and all(m.startswith("llm:") for m in models)
 
 
 def test_llm_none_marks_processed_when_attempts_exhausted(db_path, monkeypatch):
@@ -84,9 +102,30 @@ def test_llm_success_marks_processed(db_path, monkeypatch):
     assert row["extract_attempts"] == 0
 
 
+def test_llm_breaker_makes_recent_items_wait(db_path, monkeypatch):
+    """v1.0: breaker open (≥2 recent llm errors, errors > oks) → the LLM is
+    skipped and a RECENT item waits for it (it used to be marked done with
+    keyword signals only, and never reached the LLM)."""
+    item_id = _item("brk0")
+    for _ in range(2):
+        dbmod.execute(
+            "INSERT INTO poll_log (source, status, rows, error, started_at, finished_at) "
+            "VALUES ('llm', 'error', NULL, 'boom', ?, ?)",
+            (dbmod.now_utc(), dbmod.now_utc()),
+        )
+
+    async def must_not_run(*a, **k):
+        raise AssertionError("LLM must be skipped while the breaker is open")
+
+    monkeypatch.setattr(pipeline, "extract_signals_llm", must_not_run)
+    assert asyncio.run(pipeline.process_item(_row(item_id), _settings())) == -1
+    assert _row(item_id)["processed"] == 0
+
+
 def test_llm_breaker_skips_llm_and_notes_it(db_path, monkeypatch):
-    """FIX N9: ≥2 recent llm errors and errors > oks → the LLM is skipped for
-    this pass (rules still run) and the skip is noted in the takeaways."""
+    """FIX N9 / v1.0: an item that has waited longer than llm.llm_wait_hours
+    while the breaker is open falls back to keyword matches, noted in the
+    takeaways."""
     item_id = _item("brk1")
     for _ in range(2):
         dbmod.execute(
@@ -101,6 +140,8 @@ def test_llm_breaker_skips_llm_and_notes_it(db_path, monkeypatch):
         return []
 
     monkeypatch.setattr(pipeline, "extract_signals_llm", must_not_run)
+    dbmod.execute("UPDATE raw_items SET retrieved_at = '2026-01-01T00:00:00Z' WHERE id = ?",
+                  (item_id,))
     asyncio.run(pipeline.process_item(_row(item_id), _settings()))
     assert calls == []                              # the LLM was skipped
     row = _row(item_id)

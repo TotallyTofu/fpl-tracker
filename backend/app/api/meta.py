@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException
 
 from .. import season as season_svc
 from ..config import ConfigFile, load_config, load_settings, save_config
-from ..db import recent_polls
+from ..db import query, recent_polls
 from ..fetchers import fpl as fpl_fetcher
 from ..startup import refresh_one
 
@@ -75,6 +75,69 @@ async def get_db_stats() -> dict:
     }
 
 
+_SOURCES = ("fpl-official", "bbc", "espn", "reddit", "youtube")
+
+
+@router.get("/meta/sources")
+async def get_sources() -> dict:
+    """Per-source health for the News page: enabled, last poll, items,
+    live signals, items waiting for extraction, and source-specific notes."""
+    from ..db import now_utc
+
+    s = load_settings()
+    cfg = s.config
+    now = now_utc()
+    enabled = {
+        "fpl-official": cfg.sources.fpl.enabled,
+        "bbc": cfg.sources.bbc.enabled,
+        "espn": cfg.sources.espn.enabled,
+        "reddit": cfg.sources.reddit.enabled,
+        "youtube": cfg.sources.youtube.enabled,
+    }
+    poll_name = {"fpl-official": "fpl"}
+    out = []
+    for src in _SOURCES:
+        last = query("SELECT status, rows, error, finished_at FROM poll_log WHERE source = ? "
+                     "ORDER BY id DESC LIMIT 1", (poll_name.get(src, src),))
+        items = query(
+            "SELECT COUNT(*) AS n, MAX(retrieved_at) AS last, "
+            "SUM(CASE WHEN processed = 0 THEN 1 ELSE 0 END) AS waiting, "
+            "SUM(CASE WHEN published_at IS NULL THEN 1 ELSE 0 END) AS undated, "
+            "SUM(CASE WHEN takeaways LIKE '%circuit breaker open%' THEN 1 ELSE 0 END) AS skipped "
+            "FROM raw_items WHERE source = ?", (src,))[0]
+        sigs = query("SELECT COUNT(*) AS n FROM signals WHERE expires_at > ? AND "
+                     "(source = ? OR source LIKE ?)", (now, src, f"{src}:%"))[0]["n"]
+        out.append({
+            "source": src,
+            "enabled": enabled[src],
+            "last_poll": last[0] if last else None,
+            "items": items["n"] or 0,
+            "last_item": items["last"],
+            "waiting": items["waiting"] or 0,
+            "undated": items["undated"] or 0,
+            "skipped_by_llm_breaker": items["skipped"] or 0,
+            "live_signals": sigs,
+        })
+    llm_rows = query("SELECT status, COUNT(*) AS n FROM poll_log WHERE source = 'llm' "
+                     "AND started_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-7 days') "
+                     "GROUP BY status")
+    llm_counts = {r["status"]: r["n"] for r in llm_rows}
+    llm_last = query("SELECT status, error, finished_at FROM poll_log WHERE source = 'llm' "
+                     "ORDER BY id DESC LIMIT 1")
+    return {
+        "sources": out,
+        "llm": {
+            "ready": s.llm_ready,
+            "model": s.llm_model or None,
+            "base_url": s.llm_base_url,
+            "disable_thinking": bool(getattr(cfg.llm, "disable_thinking", True)),
+            "ok_7d": llm_counts.get("ok", 0),
+            "errors_7d": llm_counts.get("error", 0),
+            "last": llm_last[0] if llm_last else None,
+        },
+    }
+
+
 @router.post("/refresh/{source}")
 async def refresh(source: str) -> dict:
     """On-demand refresh (PLAN.MD §8.4). Runs the fetcher immediately, then the
@@ -111,6 +174,10 @@ def _settings_payload(s) -> dict:
     so they cannot diverge. A3: the key is redacted, never echoed."""
     out = s.config.model_dump()
     out["llm"]["api_key"] = ""            # A3
+    # v1.0: the Reddit OAuth secret is a credential too — never echoed.
+    reddit_secret_set = bool(out["sources"]["reddit"].get("oauth_client_secret"))
+    out["sources"]["reddit"]["oauth_client_secret"] = ""
+    out["reddit_status"] = {"secret_set": reddit_secret_set}
     # which source won, per value (.env beats config.json when set)
     from_env = {
         "base_url": bool(os.getenv("LLM_BASE_URL", "").strip()),
@@ -157,10 +224,13 @@ async def put_settings(body: ConfigFile) -> dict:
         raise HTTPException(422, "youtube.interval_min must be >= 5")
     if body.optimizer.solver.timebox_sec < 1 or body.optimizer.solver.timebox_sec > 60:
         raise HTTPException(422, "solver.timebox_sec must be 1–60")
+    stored = load_config()
     if not body.llm.api_key:                       # empty = "leave as-is" (FIX.MD A3)
         # preserve the *config.json* value, not the env-merged one, so a PUT
         # never copies an env key into the file
-        body.llm.api_key = load_config().llm.api_key
+        body.llm.api_key = stored.llm.api_key
+    if not body.sources.reddit.oauth_client_secret:  # v1.0: same rule for the Reddit secret
+        body.sources.reddit.oauth_client_secret = stored.sources.reddit.oauth_client_secret
     save_config(body)
     # A17: return the effective (env-merged) values, same shape as GET —
     # status row stays correct after every save.
@@ -189,6 +259,12 @@ async def test_llm(body: dict | None = None) -> dict:
     model = (b.get("model") or "").strip()
     if not (api_key or s.llm_api_key) or not (model or s.llm_model):
         return {"ok": False, "error": "LLM model or API key not set (fill them in this page or .env)"}
+    # v1.0 security: the saved key is only ever sent to the saved endpoint. A
+    # draft base_url must come with its own key — otherwise any page that can
+    # reach this local server could have the app post your key to its server.
+    if base_url and base_url.rstrip("/") != (s.llm_base_url or "").rstrip("/") and not api_key:
+        return {"ok": False, "error": "To test a different base URL, type the API key for it too "
+                                      "(the saved key is only sent to the saved URL)."}
     # A20: the one shared probe (256-token budget, configured timeout) — this
     # endpoint and the scheduler-side health check cannot drift apart again.
     out = await llm_extractor.test_llm_connection(

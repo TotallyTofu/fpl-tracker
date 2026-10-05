@@ -51,10 +51,14 @@ RULES:
    mis-transcriptions (for example "Calbertt Lewing" may mean Calvert-Lewin, "Leads" may mean Leeds).
    Use the player list as the reference and map such names to the correct player_id.
 2. If a statement is vague, speculative, or clearly about the distant future (beyond ~2 gameweeks), skip it.
+   Only club availability and selection matter. National-team news counts only when it reports an injury
+   or suspension that affects the player's club; being left out of a national squad, or scoring for a
+   national team, is not a signal. Price changes, ownership, transfer counts and managers' opinions about
+   FPL picks are not signals.
 3. sentiment: "negative" (injury, suspension, rotation out, transfer out, doubt),
    "positive" (confirmed to start, return, clear to play, transfer in), "neutral" (context, mixed).
-4. confidence 0.0-1.0: official confirmation 0.9-1.0; reputable reporting 0.6-0.8;
-   speculation/rumor 0.3-0.5; vague context 0.2.
+4. confidence 0.0-1.0: official club/manager confirmation 0.9-1.0; reputable reporting 0.6-0.8;
+   speculation/rumor 0.3-0.5; vague context 0.2. National-team injury reports: at most 0.6.
 5. summary: one factual sentence (max 25 words), no commentary, no hedging beyond what the source says.
 6. Do not invent information that is not in the content. Prefer fewer, accurate signals over many weak ones.
 
@@ -99,7 +103,8 @@ def render_player_list(players: list[dict]) -> str:
     return "\n".join(lines)
 
 
-MAX_LIST_PLAYERS = 40
+# A Weekender transcript names ~60 players; 40 silently dropped a third of them.
+MAX_LIST_PLAYERS = 80
 
 
 def _relevant_players(text: str, player_list: list[dict]) -> list[dict]:
@@ -178,6 +183,12 @@ def _validate(payload: LLMResponse, valid_ids: set[int]) -> list[dict]:
 # FIX N4: capability cache — remember when the server rejects JSON mode so
 # later calls skip the rejected field instead of paying the 400 round-trip.
 _json_mode_ok: bool | None = None
+# v1.0: same cache for chat_template_kwargs (the "thinking off" switch).
+_template_kwargs_ok: bool | None = None
+
+
+def _wants_no_thinking(settings) -> bool:
+    return bool(getattr(settings.config.llm, "disable_thinking", True))
 
 
 def _llm_timeout(cfg) -> httpx.Timeout:
@@ -206,7 +217,7 @@ def _parse_sse_line(line: str) -> dict | None:
 
 
 def _chat_body(settings, messages: list[dict], max_tokens: int,
-               json_mode: bool, stream: bool) -> dict:
+               json_mode: bool, stream: bool, no_thinking: bool = False) -> dict:
     body = {
         "model": settings.llm_model,
         "temperature": 0,
@@ -215,6 +226,10 @@ def _chat_body(settings, messages: list[dict], max_tokens: int,
     }
     if json_mode:
         body["response_format"] = {"type": "json_object"}   # FIX N4
+    if no_thinking:
+        # v1.0: thinking models (Gemma 4, Qwen 3) otherwise reason for 60k+
+        # chars on one article and hit the output cap before answering.
+        body["chat_template_kwargs"] = {"enable_thinking": False}
     if stream:
         body["stream"] = True
     return body
@@ -263,21 +278,30 @@ async def _chat_once(client, settings, messages: list[dict],
 
     Returns (content, finish_reason).
     """
-    global _json_mode_ok
+    global _json_mode_ok, _template_kwargs_ok
     url = settings.llm_base_url.rstrip("/") + "/chat/completions"
     headers = {"Authorization": f"Bearer {settings.llm_api_key}"}
-    body = _chat_body(settings, messages, max_tokens, _json_mode_ok is not False, True)
-    plain_body = _chat_body(settings, messages, max_tokens, False, False)
+    no_thinking = _wants_no_thinking(settings) and _template_kwargs_ok is not False
+    body = _chat_body(settings, messages, max_tokens, _json_mode_ok is not False, True, no_thinking)
+    plain_body = _chat_body(settings, messages, max_tokens, False, False, no_thinking)
 
     parts: list[str] = []
     reasoning: list[str] = []  # A5: thinking models stream the answer here
     finish: str | None = None
     saw_stream = False
     async with client.stream("POST", url, json=body, headers=headers) as r:
-        if r.status_code == 400 and "response_format" in (r.text or "").lower():
-            _json_mode_ok = False
-            log.info("LLM server rejected response_format=json_object — retrying without it")
-            return await _chat_once_plain(settings, client, plain_body, headers)
+        if r.status_code == 400:
+            if hasattr(r, "aread"):
+                await r.aread()   # a streamed body must be read before .text
+            text = (getattr(r, "text", "") or "").lower()
+            if "chat_template_kwargs" in text and no_thinking:
+                _template_kwargs_ok = False
+                log.info("LLM server rejected chat_template_kwargs — retrying without it")
+                return await _chat_once(client, settings, messages, max_tokens)
+            if "response_format" in text:
+                _json_mode_ok = False
+                log.info("LLM server rejected response_format=json_object — retrying without it")
+                return await _chat_once_plain(settings, client, plain_body, headers)
         r.raise_for_status()
         async for line in r.aiter_lines():
             payload = _parse_sse_line(line)
@@ -508,6 +532,8 @@ async def test_llm_connection(settings, *, base_url=None, api_key=None, model=No
         "max_tokens": 256,   # A20: thinking models burn 8 tokens on reasoning
         "messages": [{"role": "user", "content": "Reply with the single word: ok"}],
     }
+    if _wants_no_thinking(settings) and _template_kwargs_ok is not False:
+        body["chat_template_kwargs"] = {"enable_thinking": False}
     # A20 rev 2: keep connect/pool tight — a bare float timeout applies to every
     # phase, so a blackholed host would hang the Settings button for the full
     # read budget (llm.timeout_sec, 300 s default) with no feedback. Only the
@@ -521,6 +547,11 @@ async def test_llm_connection(settings, *, base_url=None, api_key=None, model=No
                 json=body,
                 headers={"Authorization": f"Bearer {eff_key}"},
             )
+            if (r.status_code == 400 and "chat_template_kwargs" in body
+                    and "chat_template_kwargs" in (r.text or "").lower()):
+                body.pop("chat_template_kwargs")
+                r = await client.post(url, json=body,
+                                      headers={"Authorization": f"Bearer {eff_key}"})
         if r.status_code == 200:
             data = r.json()
             choice = (data.get("choices") or [{}])[0]

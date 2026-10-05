@@ -182,6 +182,8 @@ CREATE TABLE IF NOT EXISTS lineups (
   chips TEXT NOT NULL DEFAULT '{}',            -- JSON {chip_name: sets_remaining}
   is_current INTEGER NOT NULL DEFAULT 0,
   kind TEXT NOT NULL DEFAULT 'current',        -- T4.3: current | test
+  bank_money INTEGER,                          -- v1.0: money in the bank, £0.1m (NULL = unknown)
+  bank_gw INTEGER,                             -- v1.0: GW the transfer_bank count applies to
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -435,6 +437,11 @@ def init_db(path: str | Path | None = None) -> None:
         lup = _table_columns(conn, "lineups")
         if lup and "kind" not in lup:
             conn.execute("ALTER TABLE lineups ADD COLUMN kind TEXT NOT NULL DEFAULT 'current'")
+        # v1.0 migration: money in the bank + the GW the free-transfer count is for
+        if lup and "bank_money" not in lup:
+            conn.execute("ALTER TABLE lineups ADD COLUMN bank_money INTEGER")
+        if lup and "bank_gw" not in lup:
+            conn.execute("ALTER TABLE lineups ADD COLUMN bank_gw INTEGER")
         # FIX N10 migration: raw_items.extract_attempts (additive, retry counter)
         ri = _table_columns(conn, "raw_items")
         if ri and "extract_attempts" not in ri:

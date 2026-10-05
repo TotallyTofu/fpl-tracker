@@ -17,8 +17,15 @@ import pytest  # noqa: E402
 from app import db as dbmod  # noqa: E402
 
 NOW = "2026-09-19T12:00:00Z"
+# A publish time that is "just now" whenever the suite runs: signals expire
+# relative to when their news was published (v1.0), so a fixed past date
+# would already be stale.
+RECENT = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-TEAMS = [(1, "Alpha FC"), (2, "Beta FC"), (3, "Gamma FC"), (4, "Delta FC"), (5, "Epsilon FC")]
+# Zeta FC has no players: it only gives Epsilon a GW6 opponent (a club with no
+# fixture is a blank gameweek and scores 0 since v1.0).
+TEAMS = [(1, "Alpha FC"), (2, "Beta FC"), (3, "Gamma FC"), (4, "Delta FC"), (5, "Epsilon FC"),
+         (6, "Zeta FC")]
 
 # (id, web_name, element_type, team, now_cost, ep_next, selected_by_percent, status)
 # now_cost is in FPL units: 10 = £1m (a £4.5m player = 45). Squad budget = 1000.
@@ -61,6 +68,7 @@ EVENTS = [
 FIXTURES_GW6 = [
     (6, 1, 2, "2026-09-26T15:00:00Z", 1, 2),
     (6, 3, 4, "2026-09-26T17:30:00Z", 2, 1),
+    (6, 5, 6, "2026-09-26T20:00:00Z", 3, 3),
 ]
 
 # Real API spelling (bootstrap-static chips[]): "3xc", not "triple_captain".
@@ -162,3 +170,9 @@ def valid_squad():
         mkplayer(24, 4, 5, 80),                # FWD t5
     ]
     return squad
+
+@pytest.fixture(autouse=True)
+def _allow_testclient_host(monkeypatch):
+    """The app only answers on loopback host names (main.LocalOnlyGuard);
+    Starlette's TestClient sends Host: testserver."""
+    monkeypatch.setenv("FPL_ALLOWED_HOSTS", "testserver")

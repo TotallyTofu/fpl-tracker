@@ -7,12 +7,20 @@ Two inputs:
 
 Rule signals never exceed confidence 0.6. Items older than 7 days are skipped.
 YouTube items use title + description only on the rule path (auto-caption
-noise is LLM-only material).
+noise is LLM-only material); Reddit items use the post only, not the comments.
+
+v1.0 precision pass (this path is now the fallback when the LLM cannot read
+an item): questions are skipped, the name must appear as a proper noun ("the
+fee paid" is not Le Fée), and a name that is part of someone else's full name
+is rejected ("Steve Clarke" is not Clarke, "Scott McTominay" is not Scott,
+"John Stones" is not John) unless the neighbouring word is the player's own
+first name or a possessive ("Brighton's Gomez").
 """
 from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from datetime import datetime, timedelta, timezone
 
 from ..db import execute_many, now_utc, query
@@ -59,6 +67,79 @@ MAX_ITEM_AGE_DAYS = 7
 _SUMMARY_LIMIT = 200
 
 
+_FOLD = str.maketrans({"ß": "ss", "ø": "o", "Ø": "O", "æ": "ae", "Æ": "AE", "đ": "d",
+                       "Đ": "D", "ł": "l", "Ł": "L", "ı": "i", "’": "'"})
+_WORD_RE = re.compile(r"[A-Za-z][A-Za-z'.\-]*")
+
+
+def _fold(text: str) -> str:
+    """Accent-fold while keeping case (Ødegaard → Odegaard, Groß → Gross)."""
+    t = unicodedata.normalize("NFKD", (text or "").translate(_FOLD))
+    return "".join(c for c in t if not unicodedata.combining(c))
+
+
+def _title_case(sentence: str) -> bool:
+    words = [w for w in _WORD_RE.findall(sentence) if len(w) >= 3]
+    if len(words) < 4:
+        return False
+    return sum(1 for w in words if w[0].isupper()) / len(words) > 0.6
+
+
+def _player_names(pids: set[int]) -> dict[int, dict]:
+    if not pids:
+        return {}
+    rows = query(
+        "SELECT id, web_name, first_name, second_name, known_name FROM players WHERE id IN (%s)"
+        % ",".join("?" * len(pids)), list(pids))
+    return {r["id"]: r for r in rows}
+
+
+def _own_name_words(info: dict) -> set[str]:
+    words: set[str] = set()
+    for k in ("first_name", "second_name", "known_name", "web_name"):
+        for w in _WORD_RE.findall(_fold(info.get(k) or "")):
+            words.add(w.lower().strip(".'-"))
+    return words
+
+
+def _plausible_mention(sentence: str, info: dict) -> bool:
+    """False when the player's name only shows up as a common word or as part
+    of another person's full name (see module doc). True when it cannot judge
+    (e.g. an alias or misspelling matched)."""
+    folded = _fold(sentence)
+    own = _own_name_words(info)
+    full = {(_fold(info.get(k) or "").split(".")[-1].strip() or _fold(info.get(k) or ""))
+            for k in ("web_name", "known_name", "second_name") if info.get(k)}
+    last = {f.split()[-1] for f in full if f.split()}
+    # full forms first ("Le Fee"), then their last word ("Fee") — the matcher
+    # also keys on the last word, which is how "the fee paid" matched Le Fée.
+    surfaces = sorted(full, key=len, reverse=True) + sorted(last - full, key=len, reverse=True)
+    for surface in surfaces:
+        m = re.search(rf"(?<![A-Za-z]){re.escape(surface)}(?![A-Za-z])", folded, re.IGNORECASE)
+        if not m:
+            continue
+        if not m.group(0)[:1].isupper():
+            return False                          # "fee", "the white shirt"
+        if _title_case(folded):
+            return True                           # headline casing tells us nothing
+        before = re.search(r"([A-Za-z][A-Za-z'.\-]*)\s+$", folded[:m.start()])
+        if before:
+            w = before.group(1)
+            first = (info.get("first_name") or "").lower()
+            if (w[0].isupper() and not w.endswith(("'s", "s'"))
+                    and w.lower().strip(".'-") not in own
+                    and not (first and first.startswith(w.lower().rstrip(".")))
+                    and not re.search(r"[.!?:;\"(]\s*$", folded[:before.start()] or ".")):
+                return False                      # "Steve Clarke"
+        after = re.match(r"\s+([A-Za-z][A-Za-z'.\-]*)", folded[m.end():])
+        if after:
+            w = after.group(1)
+            if w[0].isupper() and w.lower().strip(".'-") not in own:
+                return False                      # "Scott McTominay", "John Stones"
+        return True
+    return True
+
+
 def _sentences(text: str) -> list[str]:
     parts = re.split(r"(?<=[.!?])\s+|\n+", text or "")
     return [p.strip() for p in parts if p.strip()]
@@ -90,6 +171,9 @@ def extract_signals_rule(item: dict, idx: dict) -> list[dict]:
     # YouTube: rule path on title + description only — strip any transcript part.
     if src == "youtube" and body:
         body = body.split("--- TRANSCRIPT ---")[0]
+    # Reddit: the post only — comments are opinions and questions, not news.
+    if src == "reddit" and body:
+        body = body.split("--- TOP COMMENTS ---")[0]
     age = item_age_days(item.get("published_at"))
     if age is not None and age > MAX_ITEM_AGE_DAYS:
         return []
@@ -102,9 +186,12 @@ def extract_signals_rule(item: dict, idx: dict) -> list[dict]:
         return []
 
     signals: list[dict] = []
+    names_cache: dict[int, dict] = {}
     for sent in _sentences(text):
         if len(sent) > _MAX_SENTENCE_LEN:
             continue  # data-dump line (tables etc.) — not a news sentence
+        if sent.rstrip().endswith("?"):
+            continue  # a question is not news
         # FIX §12: resolve per sentence. resolve_candidates computes spans on
         # a de-accented/lowercased copy of the text — different offsets than
         # the original when input is NFD-decomposed — and the old global-span
@@ -112,6 +199,12 @@ def extract_signals_rule(item: dict, idx: dict) -> list[dict]:
         # resolution is direct and cheap (the index regex is compiled once).
         players_in_sent = {c["player_id"]
                            for c in names_mod.resolve_candidates(sent, idx)}
+        if not players_in_sent:
+            continue
+        missing = players_in_sent - names_cache.keys()
+        names_cache.update(_player_names(missing))
+        players_in_sent = {pid for pid in players_in_sent
+                           if _plausible_mention(sent, names_cache.get(pid, {}))}
         if not players_in_sent:
             continue
         for cat, pats in _COMPILED.items():

@@ -1,5 +1,6 @@
 """Solver tests: structural validity + convergence guard (PLAN-2 T1.16, T4.1)."""
 import pytest
+from conftest import RECENT
 
 from app.optimizer.rules import validate_lineup
 from app.optimizer.solver import (
@@ -24,10 +25,12 @@ def test_all_profiles_return_valid_lineups(db_path, cfg):
         assert len(s.squad) == 15
         assert len(s.xi) == 11
         assert len(s.bench) == 4
-        # bench 1 = strongest sub: bench order must be EP-descending
+        # v1.0: FPL bench — GK sub in slot 1, outfield subs EP-descending after it
         from app.db import query
-        eps = {r["id"]: r["ep_next"] for r in query("SELECT id, ep_next FROM players")}
-        bench_eps = [eps[i] for i in s.bench]
+        rows = {r["id"]: r for r in query("SELECT id, element_type FROM players")}
+        assert rows[s.bench[0]]["element_type"] == 1
+        ep = {e["player_id"]: e["ep"] for e in s.squad}   # the solver's projection
+        bench_eps = [ep[i] for i in s.bench[1:]]
         assert bench_eps == sorted(bench_eps, reverse=True)
         assert s.captain in s.xi
         assert s.vice_captain in s.xi
@@ -69,8 +72,9 @@ def test_dedupe_marks_converged_profile(db_path, cfg):
         results[profile] = solve(SolveParams(
             current_squad=[], bank=5, chips={}, target_gw=6, profile=profile, cfg=cfg,
         ))
+    converged = lineup_key(results["safe"]) == lineup_key(results["max_ep"])
     out = dedupe_profiles(results)
-    if lineup_key(results["safe"]) == lineup_key(results["max_ep"]):
+    if converged:
         assert out["safe"].variant_of == "max_ep"
     else:
         assert out["safe"].variant_of is None
@@ -92,23 +96,21 @@ def test_solver_fails_on_empty_universe(db_path, cfg):
                           profile="max_ep", cfg=cfg))
 
 
-def test_universe_excludes_chance_zero_when_active(db_path, cfg):
-    """T2.10: chance_of_playing_next_round = 0 is excluded only when
-    optimizer.availability.active is True."""
+def test_universe_excludes_chance_zero(db_path, cfg):
+    """v1.0: chance_of_playing_next_round = 0 is always excluded — FPL's own
+    expected points for such a player are 0, whatever the availability map."""
     from app.db import execute
     from app.optimizer.solver import build_universe
 
     execute("UPDATE players SET chance_of_playing_next_round = 0 WHERE id = 23")
-    ids_inactive = {p["id"] for p in build_universe(6, cfg)}  # cfg fixture: active=False
-    assert 23 in ids_inactive
-
+    assert 23 not in {p["id"] for p in build_universe(6, cfg)}  # active=False
     cfg.optimizer.availability.active = True
-    ids_active = {p["id"] for p in build_universe(6, cfg)}
-    assert 23 not in ids_active
+    assert 23 not in {p["id"] for p in build_universe(6, cfg)}
 
 
 def test_signal_applied_note_in_rationale(db_path, cfg):
-    """T2.10: active signals on an XI player produce a 'Signal applied' note.
+    """T2.10: active signals on an XI player produce a 'News:' rationale note
+    with the effect on the projection.
 
     Player 1 (top-EP GK) is always in the XI, so the note is guaranteed.
     """
@@ -118,7 +120,7 @@ def test_signal_applied_note_in_rationale(db_path, cfg):
     sig = {
         "player_id": 1, "category": "injury", "sentiment": "negative",
         "confidence": 0.2, "summary": "Goal One hamstring knock, to be assessed.",
-        "source": "bbc:x1", "url": "http://x", "published_at": "2026-09-19T12:00:00Z",
+        "source": "bbc:x1", "url": "http://x", "published_at": RECENT,
         "raw_item_id": None, "model": "rules",
     }
     store.save_signals([dict(sig)])
@@ -126,7 +128,7 @@ def test_signal_applied_note_in_rationale(db_path, cfg):
                           profile="max_ep", cfg=cfg,
                           signals_by_player={1: [dict(sig)]}))
     assert 1 in s.xi
-    assert any(n.startswith("Signal applied: Goal One") for n in s.notes)
+    assert any(n.startswith("News: Goal One:") and "→ −10%" in n for n in s.notes)
 
 
 # ---------------------------------------------------------------------------
@@ -157,10 +159,10 @@ def test_differential_rationale_lines_present(db_path, cfg):
     execute("UPDATE players SET selected_by_percent = 1.0")
     s = solve(SolveParams(current_squad=[], bank=5, chips={}, target_gw=6,
                           profile="differential", cfg=cfg))
-    lines = [n for n in s.notes if n.startswith("Differential: ") and "owned by" in n]
-    assert lines, "expected per-player differential rationale lines"
-    assert all("(top-50 EP)" in n for n in lines)
-    assert len(lines) <= 5
+    lines = [n for n in s.notes if "of 11 starters are owned by under 10%" in n]
+    assert len(lines) == 1, "expected one differential ownership line"
+    names = lines[0].split(": ", 1)[1]
+    assert names.count("%)") <= 5          # at most five players named
 
 
 def _mk_lineup(squad, universe):
@@ -198,11 +200,13 @@ def _converged_pair(db_path, cfg, eps):
 
 
 def test_convergence_attempt_second_captain(db_path, cfg):
-    """Attempt (1): captain moves to the 2nd-best-EP starter; no variant label."""
+    """Attempt (1): captain moves to the 2nd-best-EP starter. v1.0: the result
+    is still labelled a variant, so the UI never presents a deliberately
+    weaker captain as an independent plan."""
     # captain (id 1) is the top EP → 2nd-best (id 3) becomes captain
     a, b = _converged_pair(db_path, cfg, {1: 10.0, 3: 9.0})
     out = dedupe_profiles({"max_ep": a, "safe": b})
-    assert out["safe"].variant_of is None
+    assert out["safe"].variant_of == "max_ep"
     assert out["safe"].captain == 3
     assert out["safe"].vice_captain != 3
     assert out["safe"].vice_captain in set(out["safe"].xi)
@@ -244,7 +248,7 @@ def test_convergence_attempt_low_own_swap(db_path, cfg):
     ids = {e["player_id"] for e in out["safe"].squad}
     assert 30 in ids and 19 not in ids  # cheapest FWD (id 19) replaced
     assert 30 in out["safe"].xi
-    assert out["safe"].variant_of is None
+    assert out["safe"].variant_of == "max_ep"   # v1.0: always labelled
     assert sum(e["now_cost"] for e in out["safe"].squad) <= 1000
 
 # ---------------------------------------------------------------------------
@@ -339,8 +343,13 @@ def test_chip_covers_allows_small_gain_swap(db_path, cfg):
     FIX.MD deviation: same redesign as test_penalty_blocks_small_gain_swap.
     """
     _insert_edge_keeper()
+    # v1.0: holding a wildcard changes nothing; PLAYING it lifts the cap.
+    held = solve(SolveParams(current_squad=_current_squad(), bank=1,
+                             chips={"wildcard": 1}, target_gw=6, profile="max_ep", cfg=cfg))
+    assert not ({99, 25} <= {p["player_id"] for p in held.squad})
     s = solve(SolveParams(current_squad=_current_squad(), bank=1,
-                          chips={"wildcard": 1}, target_gw=6, profile="max_ep", cfg=cfg))
+                          chips={"wildcard": 1}, target_gw=6, profile="max_ep", cfg=cfg,
+                          chip_played="wildcard"))
     ids = {p["player_id"] for p in s.squad}
     assert 99 in ids and 25 in ids
 
@@ -496,7 +505,7 @@ def test_forced_overrun_shows_penalty(db_path, cfg):
     r = client.post("/api/suggestions/generate", json={"lineup_id": lid})
     assert r.status_code == 200, r.text
     sug = next(x for x in r.json()["suggestions"] if x["profile"] == "max_ep")
-    assert any(n.startswith("2 forced replacements exceed your bank of 1")
+    assert any(n.startswith("2 unavailable player(s) must be replaced and that exceeds your 1 free")
                for n in sug["rationale"]["notes"])
 
 
@@ -524,6 +533,9 @@ def _insert_fee_players():
     # and fund the Edge swap after one money-freeing swap. Make them
     # unavailable so the universe is exactly the fee squad + the 4 edges.
     execute("UPDATE players SET status = 'u' WHERE id < 100")
+    # These clubs have no GW6 fixture; without fixture data the projection is
+    # neutral (with it, they would be a blank gameweek and score 0).
+    execute("DELETE FROM fixtures WHERE event = 6")
     rows = [(pid, f"Fee{pid}", et, team, cost, 5.0)
             for pid, (et, team, cost) in _FEE_SQUAD.items()]
     rows += [(pid, f"Edge{pid}", et, team, cost, 50.0) for pid, et, team, cost in _FEE_EDGE]

@@ -36,12 +36,14 @@ class FplSource(BaseModel):
 
 
 class EspnSource(BaseModel):
-    # Disabled by default: ESPN's API returned 403 from the user's network (verified
-    # 2026-09-19). FPL /api/fixtures/ is the primary live-score source; ESPN is an
-    # optional add-on (news + live) the user can enable in Settings.
-    enabled: bool = False
+    # On by default since v1.0: the news endpoint answers 200 with a browser
+    # User-Agent (re-verified 2026-10-05, 45 of 50 stories Premier League).
+    # Full stories come from ESPN's content API, capped per poll like BBC.
+    enabled: bool = True
     news_interval_min: int = 30
     live_interval_sec: int = 30
+    fetch_bodies: bool = True        # full story text for new items
+    max_bodies_per_poll: int = 10    # politeness cap per refresh
 
 
 class BbcSource(BaseModel):
@@ -77,7 +79,9 @@ class YouTubeSource(BaseModel):
         ]
     )
     max_transcripts_per_poll: int = 3
-    llm_truncate_chars: int = 12000
+    # A Weekender transcript is ~75k chars; 12k only ever reached the intro.
+    # The extractor chunks this at llm.batch_chars, so 60k ≈ 8 short calls.
+    llm_truncate_chars: int = 60000
 
 
 class SourcesConfig(BaseModel):
@@ -117,17 +121,29 @@ class LLMConfig(BaseModel):
     # FIX N8: time-budget for one extraction pass (items stay pending for the
     # next pass when exceeded; the scheduler job coalesces).
     extract_timebox_sec: int = 480
+    # Thinking models (Gemma 4, Qwen 3) reason for 60k+ chars on a news article
+    # and hit the output cap before answering. True sends
+    # chat_template_kwargs={"enable_thinking": false} (llama.cpp / Unsloth /
+    # vLLM chat templates); servers that reject the field are retried without it.
+    disable_thinking: bool = True
+    # Hours an item may wait for the LLM while it is failing (circuit breaker
+    # open) before the keyword extractor is used instead.
+    llm_wait_hours: int = 6
 
 
 class OptimizerWeights(BaseModel):
+    # v1.0 model (scoring.ep_final): `ep` and `form` blend FPL's next-GW
+    # expected points with the season points-per-game average; `fixture` sets
+    # how strongly fixture difficulty scales the result. Must sum to 1.
     ep: float = 0.7
     form: float = 0.15
     fixture: float = 0.15
 
 
 class AvailabilityConfig(BaseModel):
-    # M1: active=False → A(p) is pass-through except hard gates (u/s/can_select=0).
-    # M2 (T2.10) flips this to True to activate the doubt/chance map.
+    # v1.0: FPL's ep_next already includes chance of playing, so this map no
+    # longer scales projected points. It feeds the `safe` profile's
+    # reliability weight only. active=False → reliability ignores doubts.
     active: bool = False
     doubt: float = 0.7
     chance_null: float = 1.0

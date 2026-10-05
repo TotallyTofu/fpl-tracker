@@ -1,4 +1,14 @@
-"""Lineups CRUD + paste-a-list name matching (PLAN-2 T1.9)."""
+"""Lineups CRUD + paste-a-list name matching (PLAN-2 T1.9; v1.0 rules pass).
+
+v1.0:
+- ``bank_money``: the money in the bank (£0.1m). Plans then only spend money
+  the user has. NULL = unknown (the solver falls back to £100m − squad price).
+- ``transfer_bank`` is the free transfers available for gameweek ``bank_gw``
+  (0–5). When deadlines pass it rolls forward by +1 per gameweek, capped at 5,
+  so a team saved with 0 left has 1 again next week.
+- Bench: the substitute goalkeeper always takes bench slot 1 (FPL keeps him
+  in his own slot); outfield subs keep their relative order in slots 2–4.
+"""
 from __future__ import annotations
 
 import json
@@ -8,19 +18,16 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ..db import execute, now_utc, query, query_one
-from ..optimizer.rules import validate_lineup
+from ..optimizer.rules import BUDGET, validate_lineup
 from ..signals.names import match_names
 
 router = APIRouter()
 
+MAX_BANK = 5
+
 
 def _decrement_chips(lineup_id: int, chips_used: list[str]) -> None:
-    """FIX T3: subtract played chips from the lineup's in-hand sets.
-
-    Silently skips chips the lineup does not hold (never below 0). MyTeam's
-    steppers stay user-editable; this keeps them honest instead of silently
-    wrong after a chip is played.
-    """
+    """FIX T3: subtract played chips from the lineup's in-hand sets (never below 0)."""
     row = query_one("SELECT chips FROM lineups WHERE id = ?", (lineup_id,))
     if not row:
         return
@@ -29,6 +36,32 @@ def _decrement_chips(lineup_id: int, chips_used: list[str]) -> None:
         if chips.get(c, 0) > 0:
             chips[c] -= 1
     execute("UPDATE lineups SET chips = ? WHERE id = ?", (json.dumps(chips), lineup_id))
+
+
+def _next_gw() -> int | None:
+    row = query_one("SELECT id FROM events WHERE is_next = 1")
+    if row:
+        return row["id"]
+    cur = query_one("SELECT id FROM events WHERE is_current = 1")
+    return cur["id"] + 1 if cur else None
+
+
+def roll_bank(lineup: dict) -> int:
+    """Free transfers for the upcoming deadline: the stored count plus one per
+    deadline passed since ``bank_gw`` (max 5). Persists the rolled value."""
+    bank = int(lineup["transfer_bank"])
+    since = lineup.get("bank_gw")
+    nxt = _next_gw()
+    if since is None or nxt is None or nxt <= since:
+        if since is None and nxt is not None:
+            execute("UPDATE lineups SET bank_gw = ? WHERE id = ?", (nxt, lineup["id"]))
+        return bank
+    rolled = min(MAX_BANK, bank + (nxt - since))
+    execute("UPDATE lineups SET transfer_bank = ?, bank_gw = ? WHERE id = ?",
+            (rolled, nxt, lineup["id"]))
+    lineup["transfer_bank"] = rolled
+    lineup["bank_gw"] = nxt
+    return rolled
 
 
 class LineupPlayerIn(BaseModel):
@@ -42,7 +75,8 @@ class LineupPlayerIn(BaseModel):
 
 class LineupIn(BaseModel):
     name: str = Field(min_length=1, max_length=100)
-    transfer_bank: int = Field(1, ge=1, le=5)
+    transfer_bank: int = Field(1, ge=0, le=MAX_BANK)
+    bank_money: int | None = Field(None, ge=0, le=2000)   # £0.1m; None = unknown
     chips: dict[str, int] = Field(
         default_factory=lambda: {"wildcard": 2, "freehit": 2, "bboost": 2, "triple_captain": 2}
     )
@@ -55,15 +89,35 @@ class ChipPlayIn(BaseModel):
     chip: Literal["wildcard", "freehit", "bboost", "triple_captain"]
 
 
+def _normalize_bench(body: LineupIn) -> None:
+    """GK sub → bench slot 1; outfield subs keep their order in 2–4."""
+    bench = [p for p in body.players if p.role == "bench"]
+    if len(bench) != 4:
+        return
+    types = {r["id"]: r["element_type"] for r in query(
+        "SELECT id, element_type FROM players WHERE id IN (%s)" % ",".join("?" * len(bench)),
+        [p.player_id for p in bench])}
+    gks = [p for p in bench if types.get(p.player_id) == 1]
+    if len(gks) != 1:
+        return
+    outfield = sorted((p for p in bench if p is not gks[0]),
+                      key=lambda p: p.bench_order if p.bench_order is not None else 9)
+    gks[0].bench_order = 1
+    for i, p in enumerate(outfield, start=2):
+        p.bench_order = i
+
+
 def _load_lineup(lid: int) -> dict | None:
     row = query_one("SELECT * FROM lineups WHERE id = ?", (lid,))
     if not row:
         return None
+    roll_bank(row)
     row["chips"] = json.loads(row["chips"])
     pps = query(
         """SELECT lp.*, p.web_name, p.element_type, p.team, p.now_cost, p.status, p.can_select,
-                  p.ep_next, p.selected_by_percent, p.chance_of_playing_next_round,
-                  t.name AS team_name
+                  p.ep_next, p.form, p.points_per_game, p.selected_by_percent,
+                  p.chance_of_playing_next_round, p.news,
+                  t.name AS team_name, t.short_name AS team_short
            FROM lineup_players lp
            JOIN players p ON p.id = lp.player_id
            LEFT JOIN teams t ON t.id = p.team
@@ -95,14 +149,19 @@ def _load_lineup(lid: int) -> dict | None:
     ]
     check = validate_lineup(squad, row["transfer_bank"], row["chips"], strict=False)
     row["validation"] = {"valid": check.valid, "errors": check.errors}
-    row["budget_remaining"] = 1000 - sum(p["now_cost"] for p in squad)
+    # money in the bank: the user's figure, else the £100m − squad-price estimate
+    est = max(0, BUDGET - sum(p["now_cost"] for p in squad))
+    row["budget_remaining"] = row["bank_money"] if row.get("bank_money") is not None else est
+    row["money_known"] = row.get("bank_money") is not None
     return row
 
 
 @router.get("/lineups")
 async def list_lineups() -> dict:
-    rows = query("SELECT id, name, transfer_bank, chips, is_current, kind, created_at, updated_at FROM lineups ORDER BY id")
+    rows = query("SELECT id, name, transfer_bank, bank_money, bank_gw, chips, is_current, kind, "
+                 "created_at, updated_at FROM lineups ORDER BY id")
     for r in rows:
+        roll_bank(r)
         r["chips"] = json.loads(r["chips"])
     return {"lineups": rows}
 
@@ -121,14 +180,18 @@ async def list_chip_plays(gw: int | None = None) -> dict:
 async def log_chip_play(body: ChipPlayIn) -> dict:
     """Record that a chip was played in a GW (drives the Free-Hit ban).
 
-    Deliberately does NOT decrement lineups.chips: the checkbox is a toggle, so a
-    decrement here double-counts (see FIX.MD A14). Edit the in-hand counts with
-    the MetaPanel steppers; `apply_suggestion` is the only automatic decrement,
-    and it is guarded by suggestions.applied_at.
+    FPL allows one chip per gameweek: logging a second, different chip for the
+    same GW is refused (409). Deliberately does NOT decrement lineups.chips
+    (the checkbox is a toggle — see FIX.MD A14).
     """
     existed = query_one("SELECT 1 AS x FROM chip_plays_log WHERE gw = ? AND chip = ?",
                         (body.gw, body.chip))
     if not existed:
+        other = query_one("SELECT chip FROM chip_plays_log WHERE gw = ? AND chip <> ?",
+                          (body.gw, body.chip))
+        if other:
+            raise HTTPException(409, f"{other['chip']} is already logged for GW{body.gw}: "
+                                     "FPL allows one chip per gameweek")
         execute(
             "INSERT INTO chip_plays_log (lineup_id, gw, chip, played_at) VALUES (NULL,?,?,?)",
             (body.gw, body.chip, now_utc()),
@@ -147,12 +210,14 @@ async def unlog_chip_play(gw: int, chip: str) -> dict:
 
 @router.post("/lineups", status_code=201)
 async def create_lineup(body: LineupIn) -> dict:
+    _normalize_bench(body)
     _validate_in(body)
     ts = now_utc()
     lid = execute(
-        "INSERT INTO lineups (name, transfer_bank, chips, is_current, kind, created_at, updated_at) "
-        "VALUES (?,?,?,?,?,?,?)",
-        (body.name, body.transfer_bank, json.dumps(body.chips), 0, body.kind or "current", ts, ts),
+        "INSERT INTO lineups (name, transfer_bank, bank_money, bank_gw, chips, is_current, kind, "
+        "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (body.name, body.transfer_bank, body.bank_money, _next_gw(), json.dumps(body.chips), 0,
+         body.kind or "current", ts, ts),
     )
     _save_players(lid, body)
     out = _load_lineup(lid)
@@ -175,10 +240,13 @@ async def update_lineup(lid: int, body: LineupIn) -> dict:
     row = query_one("SELECT kind FROM lineups WHERE id = ?", (lid,))
     if not row:
         raise HTTPException(404, "lineup not found")
+    _normalize_bench(body)
     _validate_in(body)
     execute(
-        "UPDATE lineups SET name = ?, transfer_bank = ?, chips = ?, kind = ?, updated_at = ? WHERE id = ?",
-        (body.name, body.transfer_bank, json.dumps(body.chips), body.kind or row["kind"], now_utc(), lid),
+        "UPDATE lineups SET name = ?, transfer_bank = ?, bank_money = ?, bank_gw = ?, chips = ?, "
+        "kind = ?, updated_at = ? WHERE id = ?",
+        (body.name, body.transfer_bank, body.bank_money, _next_gw(), json.dumps(body.chips),
+         body.kind or row["kind"], now_utc(), lid),
     )
     _save_players(lid, body)  # A15: reads the old rows before deleting them
     return _load_lineup(lid)
@@ -196,36 +264,39 @@ async def delete_lineup(lid: int) -> dict:
 async def set_current(lid: int) -> dict:
     if not query_one("SELECT id FROM lineups WHERE id = ?", (lid,)):
         raise HTTPException(404, "lineup not found")
-    conn = execute("UPDATE lineups SET is_current = 0 WHERE is_current = 1")
+    execute("UPDATE lineups SET is_current = 0 WHERE is_current = 1")
     execute("UPDATE lineups SET is_current = 1 WHERE id = ?", (lid,))
     return {"current": lid}
 
 
 @router.post("/lineups/{lid}/duplicate", status_code=201)
 async def duplicate_lineup(lid: int, body: dict | None = None) -> dict:
-    """T4.3: sandbox copy of a lineup — same squad/bank/chips, kind='test',
-    not current. Suggestions run against it without touching the real team."""
+    """T4.3: sandbox copy of a lineup — same squad/bank/money/chips and
+    purchase prices, kind='test', not current."""
     src = _load_lineup(lid)
     if not src:
         raise HTTPException(404, "lineup not found")
     name = (body or {}).get("name") or f"{src['name']} (test)"
     ts = now_utc()
     new_id = execute(
-        "INSERT INTO lineups (name, transfer_bank, chips, is_current, kind, created_at, updated_at) "
-        "VALUES (?,?,?,?,?,?,?)",
-        (name[:100], src["transfer_bank"], json.dumps(src["chips"]), 0, "test", ts, ts),
+        "INSERT INTO lineups (name, transfer_bank, bank_money, bank_gw, chips, is_current, kind, "
+        "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (name[:100], src["transfer_bank"], src.get("bank_money"), src.get("bank_gw"),
+         json.dumps(src["chips"]), 0, "test", ts, ts),
     )
     _save_players(
         new_id,
         LineupIn(
             name=name[:100],
             transfer_bank=src["transfer_bank"],
+            bank_money=src.get("bank_money"),
             chips=src["chips"],
             kind="test",
             players=[
                 LineupPlayerIn(
                     player_id=p["player_id"], role=p["role"], bench_order=p["bench_order"],
                     is_captain=p["is_captain"], is_vice_captain=p["is_vice_captain"],
+                    bought_cost=p["bought_cost"],
                 )
                 for p in src["players"]
             ],

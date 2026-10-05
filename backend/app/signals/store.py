@@ -20,10 +20,42 @@ def _source_ref(source: str) -> str:
     return source or "unknown"
 
 
-def _expires_for(source: str, now: datetime) -> str:
+MAX_TTL_DAYS = 21
+_FMT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _parse(ts: str | None) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        return datetime.strptime(ts, _FMT).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _next_deadline_after(ts: datetime) -> datetime | None:
+    row = query("SELECT MIN(deadline_time) AS d FROM events WHERE deadline_time > ?",
+                (ts.strftime(_FMT),))
+    return _parse(row[0]["d"]) if row and row[0]["d"] else None
+
+
+def _expires_for(source: str, now: datetime, published_at: str | None = None) -> str:
+    """v1.0: news lives from its PUBLICATION time — 72 h, or until the next
+    deadline after it was published if that is later (team news before an
+    international break stays relevant until the break ends), capped at 21
+    days. Official FPL news lives 14 days from now (it is refreshed on change).
+    """
     if source == "fpl-official":
-        return (now + timedelta(days=OFFICIAL_TTL_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return (now + timedelta(hours=DEFAULT_TTL_HOURS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return (now + timedelta(days=OFFICIAL_TTL_DAYS)).strftime(_FMT)
+    base = _parse(published_at) or now
+    if base > now:
+        base = now
+    end = base + timedelta(hours=DEFAULT_TTL_HOURS)
+    deadline = _next_deadline_after(base)
+    if deadline is not None and deadline > end:
+        end = deadline
+    end = min(end, base + timedelta(days=MAX_TTL_DAYS))
+    return end.strftime(_FMT)
 
 
 def save_signals(signals: list[dict]) -> int:
@@ -39,7 +71,9 @@ def save_signals(signals: list[dict]) -> int:
     count = 0
     for s in signals:
         ref = _source_ref(s.get("source"))
-        expires = _expires_for(s.get("source") or "", now)
+        expires = _expires_for(s.get("source") or "", now, s.get("published_at"))
+        if expires <= now_s:
+            continue   # already stale when read (e.g. an old item re-analysed)
         existing = query(
             """SELECT id, confidence, summary, expires_at FROM signals
                WHERE player_id = ? AND category = ? AND source = ? AND expires_at > ?""",

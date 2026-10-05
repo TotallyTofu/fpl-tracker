@@ -49,7 +49,7 @@ def test_compute_diff_swap_is_one_transfer():
     assert d["transfers_out"][0]["sell_value"] == 59  # 58 + (60-58)//2
     assert d["cost_delta"] == 55 - 59
     assert d["free_transfers_used"] == 1
-    assert d["bank_after"] == 1  # bank floor: never below 1 (FPL resets to 1 each GW)
+    assert d["bank_after"] == 1  # v1.0: free transfers LEFT this gameweek (2 − 1)
     assert d["penalty_points"] == 0
 
 
@@ -59,7 +59,7 @@ def test_compute_diff_penalty_over_bank():
     d = compute_diff(cur, new, bank=2)
     # 3 swaps = 3 transfers, bank 2 → 1 over → 4 pts
     assert d["penalty_points"] == 4
-    assert d["bank_after"] == 1  # bank floor: never below 1 (FPL resets to 1 each GW)
+    assert d["bank_after"] == 0  # v1.0: none left this GW; +1 when the deadline passes
     assert d["free_transfers_used"] == 2
 
 
@@ -101,15 +101,32 @@ def test_chip_advice_skip_when_no_window(db_path, cfg):
 ALL_CHIPS = {"wildcard": 1, "freehit": 1, "bboost": 1, "triple_captain": 1}
 
 
-def test_v2_wildcard_use_and_3xc_note(db_path, cfg):
-    """3 swaps (3 transfers) vs bank 1 → wildcard 'use'; captain EP 9.0 → 3XC 'use'
-    with the 3XC+WC interplay note."""
+def test_v2_one_chip_per_gameweek(db_path, cfg):
+    """3 transfers vs 1 free → wildcard would save 8 points; captain projects
+    9.0 → triple captain is worth more. FPL allows one chip per GW: exactly one
+    "use", the other is downgraded with the reason."""
     d = _big_diff(bank=1)
-    advice = chip_advice_v2(d, ALL_CHIPS, _solved(cap_ep=9.0), 5, 6, cfg)
+    advice = chip_advice_v2(d, ALL_CHIPS, _solved(cap_ep=9.0, bench_eps=(1, 1, 1, 1)), 5, 6, cfg)
     by_chip = {a["chip"]: a for a in advice}
-    assert by_chip["wildcard"]["recommendation"] == "use"
-    assert by_chip["triple_captain"]["recommendation"] == "use"
-    assert "3XC + Wildcard" in by_chip["triple_captain"]["reason"]
+    assert [a["chip"] for a in advice if a["recommendation"] == "use"] == ["triple_captain"]
+    assert by_chip["wildcard"]["recommendation"] == "consider"
+    assert "only one chip per gameweek" in by_chip["wildcard"]["reason"]
+
+
+def test_v2_chosen_chip_is_the_only_one(db_path, cfg):
+    d = compute_diff([], [], bank=1, chip_played="bboost")
+    advice = chip_advice_v2(d, ALL_CHIPS, _solved(cap_ep=12.0), 5, 6, cfg)
+    by_chip = {a["chip"]: a for a in advice}
+    assert by_chip["bboost"]["recommendation"] == "use"
+    assert all(by_chip[c]["recommendation"] == "skip"
+               for c in ("wildcard", "freehit", "triple_captain"))
+
+
+def test_v2_logged_chip_blocks_others(db_path, cfg):
+    execute("INSERT INTO chip_plays_log (lineup_id, gw, chip, played_at) "
+            "VALUES (NULL, 6, 'wildcard', '2026-09-19T12:00:00Z')")
+    advice = chip_advice_v2(_big_diff(bank=1), ALL_CHIPS, _solved(cap_ep=12.0), 5, 6, cfg)
+    assert [a["chip"] for a in advice if a["recommendation"] == "use"] == ["wildcard"]
 
 
 def test_v2_freehit_consecutive_ban(db_path, cfg):
@@ -132,21 +149,25 @@ def test_v2_3xc_confirmed_starter_signal(db_path, cfg):
     d = _big_diff(bank=1)
     sig = {"sentiment": "positive", "category": "selection", "confidence": 0.8,
            "summary": "set to start", "source": "fpl-official:1"}
-    advice = chip_advice_v2(d, ALL_CHIPS, _solved(cap_ep=7.5), 5, 6, cfg,
+    d = _big_diff(bank=3)    # transfers fit the bank → no competing wildcard "use"
+    advice = chip_advice_v2(d, ALL_CHIPS, _solved(cap_ep=7.5, bench_eps=(1, 1, 1, 1)), 5, 6, cfg,
                             signals={100: [sig]})
     by_chip = {a["chip"]: a for a in advice}
     assert by_chip["triple_captain"]["recommendation"] == "use"
     assert "confirmed-starter" in by_chip["triple_captain"]["reason"]
     # and without the signal it is only 'consider'
-    advice2 = chip_advice_v2(d, ALL_CHIPS, _solved(cap_ep=7.5), 5, 6, cfg)
+    advice2 = chip_advice_v2(d, ALL_CHIPS, _solved(cap_ep=7.5, bench_eps=(1, 1, 1, 1)), 5, 6, cfg)
     assert {a["chip"]: a for a in advice2}["triple_captain"]["recommendation"] == "consider"
 
 
 def test_v2_bench_boost_strength(db_path, cfg):
     d = _big_diff(bank=1)
-    strong = chip_advice_v2(d, ALL_CHIPS, _solved(bench_eps=(6.0, 6.0, 6.0, 6.0)), 5, 6, cfg)
-    weak = chip_advice_v2(d, ALL_CHIPS, _solved(bench_eps=(0.5, 0.5, 0.5, 0.5)), 5, 6, cfg)
-    assert {a["chip"]: a for a in strong}["bboost"]["recommendation"] == "consider"
+    # v1.0 thresholds: bench projection ≥ 14 → use, ≥ 10 → consider
+    strong = chip_advice_v2(d, ALL_CHIPS, _solved(cap_ep=5.0, bench_eps=(6.0, 6.0, 6.0, 6.0)), 5, 6, cfg)
+    fair = chip_advice_v2(d, ALL_CHIPS, _solved(cap_ep=5.0, bench_eps=(3.0, 3.0, 3.0, 2.0)), 5, 6, cfg)
+    weak = chip_advice_v2(d, ALL_CHIPS, _solved(cap_ep=5.0, bench_eps=(0.5, 0.5, 0.5, 0.5)), 5, 6, cfg)
+    assert {a["chip"]: a for a in strong}["bboost"]["recommendation"] == "use"
+    assert {a["chip"]: a for a in fair}["bboost"]["recommendation"] == "consider"
     assert {a["chip"]: a for a in weak}["bboost"]["recommendation"] == "skip"
 
 
@@ -177,9 +198,12 @@ def test_chip_covers_transfers_basic(db_path, cfg):
     from app.optimizer.transfers import chip_covers_transfers
     # conftest: wildcard+freehit windows cover GW6 (the next GW)
     assert chip_covers_transfers({}, 6) is False
-    assert chip_covers_transfers({"wildcard": 1}, 6) is True
-    assert chip_covers_transfers({"freehit": 1}, 6) is True
-    assert chip_covers_transfers({"bboost": 1}, 6) is False  # bboost doesn't free transfers
+    # v1.0: holding a chip is not playing it
+    assert chip_covers_transfers({"wildcard": 1}, 6) is False
+    assert chip_covers_transfers({"wildcard": 1}, 6, "wildcard") is True
+    assert chip_covers_transfers({"freehit": 1}, 6, "freehit") is True
+    assert chip_covers_transfers({"wildcard": 0}, 6, "wildcard") is False   # none left
+    assert chip_covers_transfers({"bboost": 1}, 6, "bboost") is False  # bboost doesn't free transfers
 
 
 def test_chip_covers_transfers_freehit_consecutive_ban(db_path, cfg):
@@ -189,11 +213,11 @@ def test_chip_covers_transfers_freehit_consecutive_ban(db_path, cfg):
     execute("INSERT INTO chip_plays_log (lineup_id, gw, chip, played_at) "
             "VALUES (NULL, 5, 'freehit', '2026-09-19T12:00:00Z')")
     # free-hit played in GW5 → not playable in GW6 → only wildcard covers
-    assert chip_covers_transfers({"freehit": 1}, 6) is False
-    assert chip_covers_transfers({"freehit": 1, "wildcard": 1}, 6) is True
+    assert chip_covers_transfers({"freehit": 1}, 6, "freehit") is False
+    assert chip_covers_transfers({"freehit": 1, "wildcard": 1}, 6, "wildcard") is True
     # after deleting the row, free-hit covers again
     execute("DELETE FROM chip_plays_log WHERE gw = 5 AND chip = 'freehit'")
-    assert chip_covers_transfers({"freehit": 1}, 6) is True
+    assert chip_covers_transfers({"freehit": 1}, 6, "freehit") is True
 
 
 def test_chip_covers_transfers_ban_row_with_any_lineup_id(db_path, cfg):
@@ -203,13 +227,13 @@ def test_chip_covers_transfers_ban_row_with_any_lineup_id(db_path, cfg):
     from app.optimizer.transfers import chip_covers_transfers
     execute("INSERT INTO chip_plays_log (lineup_id, gw, chip, played_at) "
             "VALUES (NULL, 5, 'freehit', '2026-09-19T12:00:00Z')")
-    assert chip_covers_transfers({"freehit": 1}, 6) is False
+    assert chip_covers_transfers({"freehit": 1}, 6, "freehit") is False
     execute("DELETE FROM chip_plays_log WHERE lineup_id IS NULL")
     execute("INSERT INTO lineups (id, name, created_at, updated_at) "
             "VALUES (999, 't', '2026-09-19T12:00:00Z', '2026-09-19T12:00:00Z')")
     execute("INSERT INTO chip_plays_log (lineup_id, gw, chip, played_at) "
             "VALUES (999, 5, 'freehit', '2026-09-19T12:00:00Z')")
-    assert chip_covers_transfers({"freehit": 1}, 6) is False
+    assert chip_covers_transfers({"freehit": 1}, 6, "freehit") is False
 
 
 # ---------------------------------------------------------------------------
@@ -228,11 +252,12 @@ def test_compute_diff_chip_covers():
 
 
 def test_compute_diff_bank_floor():
-    """No chip: the bank never drops below 1 even when overdrawn."""
+    """No chip, overdrawn: 0 free transfers left this gameweek (the +1 for
+    the next one is added when the deadline passes — lineups.roll_bank)."""
     cur = [{"player_id": i, "web_name": f"P{i}", "now_cost": 500, "bought_cost": 500} for i in range(1, 4)]
     new = [{"player_id": i, "web_name": f"N{i}", "now_cost": 500} for i in range(10, 13)]
     d = compute_diff(cur, new, bank=2)
-    assert d["bank_after"] == 1
+    assert d["bank_after"] == 0
     assert d["penalty_points"] == 4  # 3 swaps = 3 transfers, bank 2 → 1 over
 
 
@@ -328,7 +353,7 @@ def test_chip_advice_triple_captain_window_open(db_path, cfg):
     """In-hand triple captain + open window + high captain EP → 'use' (not the
     permanent 'skip' the raw '3xc' name used to cause)."""
     d = _big_diff(bank=1)
-    advice = chip_advice_v2(d, ALL_CHIPS, _solved(cap_ep=9.0), 5, 6, cfg)
+    advice = chip_advice_v2(d, ALL_CHIPS, _solved(cap_ep=9.0, bench_eps=(1, 1, 1, 1)), 5, 6, cfg)
     by_chip = {a["chip"]: a for a in advice}
     assert by_chip["triple_captain"]["recommendation"] == "use"
 
@@ -342,3 +367,27 @@ def test_chip_advice_triple_captain_no_window(db_path, cfg):
     assert by_chip["triple_captain"]["recommendation"] == "skip"
     assert "window" in by_chip["triple_captain"]["reason"]
     assert "sets remaining" not in by_chip["triple_captain"]["reason"]
+
+def test_compute_diff_money_with_known_bank():
+    """v1.0: money in the bank = the user's figure + sells − buys."""
+    cur = [{"player_id": 1, "web_name": "A", "now_cost": 80, "bought_cost": 70},
+           {"player_id": 2, "web_name": "B", "now_cost": 50, "bought_cost": 50}]
+    new = [{"player_id": 2, "web_name": "B", "now_cost": 50},
+           {"player_id": 3, "web_name": "C", "now_cost": 78}]
+    d = compute_diff(cur, new, bank=1, bank_money=5)
+    assert d["transfers_out"][0]["sell_value"] == 75      # 70 + (80 − 70) // 2
+    assert d["budget_before"] == 5 and d["money_known"] is True
+    assert d["budget_after"] == 5 + 75 - 78
+    est = compute_diff(cur, new, bank=1)
+    assert est["money_known"] is False
+    assert est["budget_before"] == 1000 - 130
+
+
+def test_chip_play_problem_rules(db_path, cfg):
+    from app.optimizer.transfers import chip_play_problem
+    chips = {"wildcard": 1, "freehit": 1, "bboost": 1, "triple_captain": 0}
+    assert chip_play_problem("wildcard", chips, 6) is None
+    assert "sets remaining" in chip_play_problem("triple_captain", chips, 6)
+    execute("INSERT INTO chip_plays_log (lineup_id, gw, chip, played_at) "
+            "VALUES (NULL, 6, 'bboost', '2026-09-19T12:00:00Z')")
+    assert "one chip per gameweek" in chip_play_problem("wildcard", chips, 6)
