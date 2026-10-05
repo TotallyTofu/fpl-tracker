@@ -65,15 +65,18 @@ export default function App() {
   return (
     <>
       <header className="topbar">
+        <div className="topbar-art" aria-hidden="true" />
         <div className="topbar-inner">
-          <NavLink to="/" className="brand" aria-label="FPL Tracker home">
-            <svg width="28" height="28" viewBox="0 0 28 28" fill="none" stroke="#C9F06B" strokeWidth="2" aria-hidden="true">
-              <rect x="2" y="5" width="24" height="18" rx="2" />
-              <line x1="14" y1="5" x2="14" y2="23" />
-              <circle cx="14" cy="14" r="3.5" />
-            </svg>
-            <span className="brand-word">FPL TRACKER</span>
-          </NavLink>
+          <div className="topbar-row">
+            <NavLink to="/" className="brand" aria-label="FPL Tracker home">
+              <svg className="brand-mark" width="46" height="46" viewBox="0 0 28 28" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinejoin="round" aria-hidden="true">
+                <rect x="2" y="5" width="24" height="18" rx="3" />
+                <line x1="14" y1="5" x2="14" y2="23" />
+                <circle cx="14" cy="14" r="3.5" />
+              </svg>
+              <span className="brand-word">FPL Tracker</span>
+            </NavLink>
+          </div>
           <nav className="mainnav" aria-label="Main">
             {NAV.map((n) => (
               <NavLink key={n.to} to={n.to} end={n.to === "/"} className={({ isActive }) => (isActive ? "active" : "")}>
@@ -81,10 +84,14 @@ export default function App() {
               </NavLink>
             ))}
           </nav>
-          <DeadlinePill />
-          <button type="button" className="theme-btn" onClick={nextTheme} aria-label={`Theme: ${theme}. Change theme`}>
-            {theme === "auto" ? "Auto" : theme === "light" ? "Light" : "Dark"}
-          </button>
+        </div>
+        <div className="topbar-strip">
+          <div className="topbar-strip-inner">
+            <DeadlinePill />
+            <button type="button" className="theme-btn" onClick={nextTheme} aria-label={`Theme: ${theme}. Change theme`}>
+              {theme === "auto" ? "Auto" : theme === "light" ? "Light" : "Dark"}
+            </button>
+          </div>
         </div>
       </header>
       <main className="content">

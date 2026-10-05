@@ -87,33 +87,49 @@ a { color: var(--good); }
 a:hover { color: var(--ink); }
 
 /* ------------------------------------------------------------ app shell */
-.topbar { background: var(--header); color: var(--header-ink); }
+.topbar { position: relative; overflow: hidden; color: #37003c;
+  background: linear-gradient(100deg, #1fe6ff 0%, #4c9bff 48%, #8b3dff 100%); }
+.topbar-art {
+  position: absolute; top: 0; right: 0; bottom: 50px; width: min(46vw, 600px);
+  background: url("/arsenalpromo.jpg") center 12% / cover no-repeat;
+  -webkit-mask-image: linear-gradient(to right, transparent 0%, #000 40%);
+  mask-image: linear-gradient(to right, transparent 0%, #000 40%);
+  pointer-events: none;
+}
 .topbar-inner {
-  max-width: 1280px; margin: 0 auto; padding: 8px 24px; min-height: 64px;
-  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px;
+  position: relative; max-width: 1280px; margin: 0 auto; padding: 20px 24px 0; min-height: 150px;
+  display: flex; flex-direction: column; justify-content: space-between; gap: 14px;
 }
-.brand { display: flex; align-items: center; gap: 10px; color: var(--header-ink); text-decoration: none; }
-.brand:hover { color: var(--header-ink); }
-.brand-word { font-family: var(--font-display); font-weight: 700; font-size: 24px; letter-spacing: 0.04em; }
-.mainnav { display: flex; flex-wrap: wrap; gap: 2px; flex: 1 1 auto; }
+.topbar-row { display: flex; }
+.brand { display: flex; align-items: center; gap: 12px; color: #37003c; text-decoration: none; }
+.brand:hover { color: #37003c; }
+.brand-word { font-weight: 700; font-size: 44px; line-height: 1; letter-spacing: -0.02em; }
+.mainnav { display: flex; gap: 6px; overflow-x: auto; max-width: 100%; padding-right: 16px; align-items: flex-end; }
 .mainnav a {
-  color: var(--header-muted); text-decoration: none; font-weight: 500;
-  padding: 12px 12px; border-radius: 6px;
+  flex: none; display: flex; align-items: center; min-height: 40px; padding: 0 20px;
+  border-radius: 12px 12px 0 0; background: rgba(255, 255, 255, 0.3); color: #37003c;
+  font-weight: 600; text-decoration: none; white-space: nowrap;
 }
-.mainnav a:hover { color: var(--header-ink); }
-.mainnav a.active { color: var(--header-ink); font-weight: 600; box-shadow: inset 0 -3px 0 var(--lime); border-radius: 0; }
+.mainnav a:hover { background: rgba(255, 255, 255, 0.55); color: #37003c; }
+.mainnav a.active { min-height: 46px; background: var(--bg); color: #37003c; font-weight: 700; }
+.topbar-strip { position: relative; background: linear-gradient(90deg, #3a5bc0 0%, #6a1fa8 100%); color: #fff; }
+.topbar-strip-inner {
+  max-width: 1280px; margin: 0 auto; padding: 6px 24px; min-height: 50px;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px 16px;
+}
 .deadline-pill {
   display: inline-flex; align-items: center; gap: 8px;
-  background: var(--lime); color: var(--lime-ink);
-  border-radius: 999px; padding: 7px 14px; font-weight: 600; font-size: 14px;
+  background: var(--lime); color: #37003c;
+  border-radius: 999px; padding: 7px 14px; font-weight: 700; font-size: 14px;
   font-variant-numeric: tabular-nums;
 }
 .deadline-pill.urgent { background: #ffb38a; }
 .theme-btn {
-  background: transparent; border: 1px solid #3a4248; color: var(--header-muted);
+  background: transparent; border: 1px solid rgba(255, 255, 255, 0.5); color: #fff;
   border-radius: 8px; min-height: 36px; padding: 0 10px; font: inherit; font-size: 13px; cursor: pointer;
 }
-.theme-btn:hover { color: var(--header-ink); border-color: var(--header-muted); }
+.theme-btn:hover { background: rgba(255, 255, 255, 0.15); color: #fff; opacity: 1; }
+@media (max-width: 700px) { .topbar-art { opacity: 0.35; width: 70vw; } .brand-word { font-size: 34px; } }
 
 .content { max-width: 1280px; margin: 0 auto; padding: 32px 24px 64px; }
 .page { display: flex; flex-direction: column; gap: 24px; }
