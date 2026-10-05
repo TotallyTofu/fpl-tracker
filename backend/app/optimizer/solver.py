@@ -348,14 +348,16 @@ def _seed_from_current(current_squad: list[dict], universe: list[dict], cfg,
     return squad
 
 
-def _pick_xi(squad: list[dict]) -> list[dict]:
-    """Top-11 by ep with 1 GK, ≥3 DEF, ≥1 FWD (formation enforced by swaps)."""
+def _pick_xi(squad: list[dict], key=None) -> list[dict]:
+    """Top-11 by ``key`` (default projected points) with 1 GK, ≥3 DEF, ≥1 FWD
+    (formation enforced by swaps)."""
+    key = key or (lambda p: p["ep"])
     gks = [p for p in squad if p["element_type"] == 1]
     if not gks:
         return []
-    gk = max(gks, key=lambda p: p["ep"])
+    gk = max(gks, key=key)
     rest = [p for p in squad if p["element_type"] != 1]
-    rest_sorted = sorted(rest, key=lambda p: p["ep"], reverse=True)
+    rest_sorted = sorted(rest, key=key, reverse=True)
     xi = [gk] + rest_sorted[:10]
 
     def ensure(pos: int, count: int) -> None:
@@ -368,8 +370,8 @@ def _pick_xi(squad: list[dict]) -> list[dict]:
             victims = [p for p in xi if p["element_type"] not in (pos, 1)]
             if not victims:
                 return
-            victim = min(victims, key=lambda p: p["ep"])
-            best = max(unselected, key=lambda p: p["ep"])
+            victim = min(victims, key=key)
+            best = max(unselected, key=key)
             xi[xi.index(victim)] = best
             have += 1
 
@@ -589,6 +591,65 @@ def _hill_climb(state: _State, universe: list[dict], value_fn, cfg,
     return best
 
 
+def _greedy_improve(state: _State, universe: list[dict], value_fn, tctx: _TransferCtx,
+                    captain_fn=None, max_steps: int = 15) -> None:
+    """Steepest ascent over single swaps: try every legal (out, in) pair —
+    same position, club cap, money, transfer limit — re-pick the XI and the
+    captain for each, apply the best improving swap, repeat. Deterministic.
+
+    The random hill climb alone missed the best swaps (with ~120 candidates
+    per position a 2-transfer optimum is a needle in a haystack), so
+    "Best projected" could project fewer points than the differential plan.
+    """
+    cap_fn = captain_fn or value_fn
+    by_pos: dict[int, list[dict]] = {}
+    for p in universe:
+        by_pos.setdefault(p["element_type"], []).append(p)
+
+    def evaluate(squad: list[dict]):
+        xi = _pick_xi(squad, key=value_fn)
+        if len(xi) != 11:
+            return None
+        ranked = sorted(xi, key=lambda p: (cap_fn(p), p["ep"], -p["id"]), reverse=True)
+        return tctx.total(value_fn, xi, ranked[0], squad, cap_fn), xi, ranked[0], ranked[1]
+
+    if not state.valid():
+        return
+    cur = evaluate(state.squad)
+    if cur is None:
+        return
+    for _ in range(max_steps):
+        best = None
+        ids = {p["id"] for p in state.squad}
+        for i, out_p in enumerate(state.squad):
+            for in_p in by_pos.get(out_p["element_type"], []):
+                if in_p["id"] in ids:
+                    continue
+                if in_p["team"] != out_p["team"] and state.club_count.get(in_p["team"], 0) >= CLUB_LIMIT:
+                    continue
+                spend = state.total_cost - state.cost(out_p) + state.cost(in_p) + tctx.sale_fee(out_p)
+                if spend > state.budget:
+                    continue
+                squad = state.squad[:i] + [in_p] + state.squad[i + 1:]
+                if not tctx.within_limit(squad):
+                    continue
+                ev = evaluate(squad)
+                if ev is not None and ev[0] > (best[0][0] if best else cur[0]) + 1e-9:
+                    best = (ev, i, out_p, in_p, squad)
+        if best is None:
+            break
+        ev, i, out_p, in_p, squad = best
+        state.squad = squad
+        state.club_count[out_p["team"]] -= 1
+        state.club_count[in_p["team"]] = state.club_count.get(in_p["team"], 0) + 1
+        state.total_cost += state.cost(in_p) - state.cost(out_p)
+        cur = ev
+    _, xi, captain, vice = cur
+    state.xi = list(xi)
+    state.bench = [p for p in state.squad if p not in state.xi]
+    state.captain, state.vice = captain, vice
+
+
 def _apply_ep_floor(universe: list[dict], cfg, keep_ids: frozenset = frozenset()) -> list[dict]:
     """T4.1: differential eligibility floor — candidates must have
     ep_final ≥ optimizer.differential_ep_floor × max ep_final in the universe
@@ -632,6 +693,8 @@ def _run_restarts(params: SolveParams, universe: list[dict], value_fn,
             continue
         # A21: _hill_climb gets the outer `rng`, not the per-restart `rrng`
         # (rrng is for seed variety only) — deterministic replay.
+        if tctx.within_limit(state.squad):
+            _greedy_improve(state, universe, value_fn, tctx, captain_fn)
         obj = _hill_climb(state, universe, value_fn, cfg, rng, deadline, tctx, captain_fn)
         if obj > best_obj:
             best_obj = obj

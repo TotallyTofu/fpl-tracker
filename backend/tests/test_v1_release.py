@@ -262,3 +262,33 @@ def test_sources_health_endpoint(client):
     d = client.get("/api/meta/sources").json()
     assert {s["source"] for s in d["sources"]} == {"fpl-official", "bbc", "espn", "reddit", "youtube"}
     assert "disable_thinking" in d["llm"]
+
+
+def test_team_fixtures_endpoint(client):
+    d = client.get("/api/meta/team-fixtures", params={"count": 2}).json()
+    assert d["from_gw"] == 6
+    fx = d["fixtures"]
+    assert fx["1"][0] == {"gw": 6, "opp": d["teams"]["2"]["short"], "home": True, "d": 1}
+    assert fx["2"][0]["home"] is False
+
+
+def test_best_projected_is_never_beaten_on_projection(db_path, cfg):
+    """The steepest-ascent swap search: within the same transfer limit, the
+    max_ep plan projects at least as many points as the other profiles (the
+    random search alone let "Differential" beat "Best projected")."""
+    from conftest import valid_squad as vs
+    rows = {r["id"]: r for r in dbmod.query("SELECT id, web_name, now_cost FROM players")}
+    current = [{"player_id": p["player_id"], "web_name": rows[p["player_id"]]["web_name"],
+                "now_cost": rows[p["player_id"]]["now_cost"],
+                "bought_cost": rows[p["player_id"]]["now_cost"]} for p in vs()]
+    got = {prof: solve(SolveParams(current_squad=current, bank=2, chips={}, target_gw=6,
+                                   profile=prof, cfg=cfg)).projected_points["adjusted"]
+           for prof in ("max_ep", "differential", "safe")}
+    assert got["max_ep"] >= got["differential"] - 1e-9
+    assert got["max_ep"] >= got["safe"] - 1e-9
+
+
+def test_lineup_flags_are_booleans(client):
+    lid = client.post("/api/lineups", json=BODY).json()["id"]
+    players = client.get(f"/api/lineups/{lid}").json()["players"]
+    assert all(isinstance(p["is_captain"], bool) and isinstance(p["is_vice_captain"], bool) for p in players)

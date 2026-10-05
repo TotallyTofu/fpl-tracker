@@ -1,99 +1,144 @@
-import type { SquadPlayer } from "../types";
-import { POS_SHORT, cost } from "../types";
+import type { SquadPlayer, TeamFixturesResponse } from "../types";
+import { POS_NAME, fixtureFor, money } from "../types";
 
-// A23: accepts both stored LineupPlayer[] and suggested SquadPlayer[]
-// (LineupPlayer is structurally a SquadPlayer with an extra bought_cost).
+// Accepts both stored LineupPlayer[] and suggested SquadPlayer[].
 interface Props {
   players: SquadPlayer[];
   selectedId?: number | null;
   onSelect?: (p: SquadPlayer) => void;
   /** Provide these to enable drag & drop between the XI and the bench.
-   *  Omitted (e.g. the compact suggestion view) → read-only, no dragging. */
+   *  Omitted (the plan view) → read-only, no dragging. */
   onMoveToBench?: (playerId: number) => void;
   onMoveToXi?: (playerId: number) => void;
   onBenchReorder?: (draggedId: number, targetId: number) => void;
   compact?: boolean;
+  fixtures?: TeamFixturesResponse | null;
+  gw?: number | null;
+  /** players to ring as new signings */
+  newIds?: Set<number>;
 }
 
-const BENCH_NUM = ["①", "②", "③", "④"];
-
-function statusBadge(p: SquadPlayer) {
-  if (p.status === "u" || p.status === "s" || p.can_select === 0)
-    return <span className="badge out">❌</span>;
-  if (p.status === "d" || p.chance_of_playing_next_round === 50)
-    return <span className="badge warn">⚠️</span>;
+function flag(p: SquadPlayer): { text: string; out: boolean } | null {
+  if (p.status === "u" || p.status === "s" || p.can_select === 0 || p.chance_of_playing_next_round === 0)
+    return { text: "OUT", out: true };
+  const c = p.chance_of_playing_next_round;
+  if (p.status === "d" || p.status === "i" || (c != null && c < 100))
+    return { text: c != null ? `${c}%` : "?", out: false };
   return null;
 }
 
+const projection = (p: SquadPlayer) => {
+  const v = p.ep ?? p.ep_next;
+  return v == null ? "—" : v.toFixed(1);
+};
+
+const short = (p: SquadPlayer, fx?: TeamFixturesResponse | null) =>
+  fx?.teams[String(p.team)]?.short ?? p.team_short ?? (p.team_name ?? "").slice(0, 3).toUpperCase();
+
 export default function PitchView({
-  players,
-  selectedId,
-  onSelect,
-  onMoveToBench,
-  onMoveToXi,
-  onBenchReorder,
-  compact,
+  players, selectedId, onSelect, onMoveToBench, onMoveToXi, onBenchReorder,
+  compact, fixtures, gw, newIds,
 }: Props) {
   const draggable = Boolean(onMoveToBench || onMoveToXi);
   const xi = players.filter((p) => p.role === "starter");
   const bench = players
     .filter((p) => p.role === "bench")
-    .sort((a, b) => (a.bench_order || 0) - (b.bench_order || 0));
-  const rows: { pos: number; label: string }[] = [
-    { pos: 1, label: "GK" },
-    { pos: 2, label: "DEF" },
-    { pos: 3, label: "MID" },
-    { pos: 4, label: "FWD" },
-  ];
-
+    .sort((a, b) => (a.bench_order || 9) - (b.bench_order || 9));
+  const gkSub = bench.find((p) => p.element_type === 1) ?? null;
+  const outfieldSubs = bench.filter((p) => p !== gkSub);
   const readDragId = (e: React.DragEvent) => Number(e.dataTransfer.getData("text/plain")) || 0;
+  const startDrag = (p: SquadPlayer) => (e: React.DragEvent) => {
+    e.dataTransfer.setData("text/plain", String(p.player_id));
+    e.dataTransfer.effectAllowed = "move";
+  };
 
-  const card = (p: SquadPlayer, benchIdx?: number) => (
-    <div
-      key={`${p.player_id}-${benchIdx ?? "xi"}`}
-      className={`pcard ${selectedId === p.player_id ? "selected" : ""}`}
-      draggable={draggable}
-      onDragStart={(e) => {
-        e.dataTransfer.setData("text/plain", String(p.player_id));
-        e.dataTransfer.effectAllowed = "move";
-      }}
-      onDrop={
-        benchIdx !== undefined && onBenchReorder
-          ? (e) => {
-              // Drop *on* a bench card: bench player → reorder; starter → demote.
-              e.preventDefault();
-              e.stopPropagation();
-              const id = readDragId(e);
-              if (!id || id === p.player_id) return;
-              const draggedP = players.find((x) => x.player_id === id);
-              if (draggedP?.role === "bench") onBenchReorder(id, p.player_id);
-              else onMoveToBench?.(id);
-            }
-          : undefined
-      }
-      onDragOver={benchIdx !== undefined && onBenchReorder ? (e) => e.preventDefault() : undefined}
-      onClick={() => onSelect?.(p)}
-      title={`${p.web_name} — ${p.team_name ?? ""} ${cost(p.now_cost)}`}
-    >
-      <div className="pname">
-        {benchIdx !== undefined && <span className="muted">{BENCH_NUM[benchIdx]} </span>}
-        {p.web_name}
+  const token = (p: SquadPlayer) => {
+    const f = flag(p);
+    const fx = fixtureFor(fixtures ?? null, p.team, gw);
+    const cls = ["token", newIds?.has(p.player_id) ? "new" : "", selectedId === p.player_id ? "selected" : ""].join(" ");
+    return (
+      <button
+        type="button"
+        key={p.player_id}
+        className={cls}
+        draggable={draggable}
+        onDragStart={draggable ? startDrag(p) : undefined}
+        onClick={() => onSelect?.(p)}
+        disabled={!onSelect}
+        aria-pressed={onSelect ? selectedId === p.player_id : undefined}
+        title={`${p.web_name} · ${POS_NAME[p.element_type]} · ${p.team_name ?? ""} · ${money(p.now_cost)}`}
+      >
+        <span className="shirt">
+          {short(p, fixtures)}
+          {p.is_captain ? <span className="armband" aria-label="Captain">C</span> : null}
+          {p.is_vice_captain ? <span className="armband vc" aria-label="Vice-captain">V</span> : null}
+          {f && <span className={`flag-badge ${f.out ? "out" : ""}`}>{f.text}</span>}
+        </span>
+        <span className="nameplate">{p.web_name}</span>
+        <span className="token-meta">
+          {fx.label && <span className={`fdr ${fx.cls}`}>{fx.label}</span>}
+          <span className="pts" title="projected points">{projection(p)}</span>
+        </span>
+      </button>
+    );
+  };
+
+  const benchCard = (p: SquadPlayer, label: string, isGk: boolean) => {
+    const f = flag(p);
+    const fx = fixtureFor(fixtures ?? null, p.team, gw);
+    return (
+      <div
+        key={p.player_id}
+        className={`bench-slot ${isGk ? "gk" : ""}`}
+        onDragOver={!isGk && onBenchReorder ? (e) => e.preventDefault() : undefined}
+        onDrop={
+          !isGk && onBenchReorder
+            ? (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const id = readDragId(e);
+                if (!id || id === p.player_id) return;
+                const dragged = players.find((x) => x.player_id === id);
+                if (dragged?.role === "bench") onBenchReorder(id, p.player_id);
+                else onMoveToBench?.(id);
+              }
+            : undefined
+        }
+      >
+        <span className="bench-label">{label}</span>
+        <button
+          type="button"
+          className={`bench-card ${selectedId === p.player_id ? "selected" : ""} ${newIds?.has(p.player_id) ? "new" : ""}`}
+          draggable={draggable}
+          onDragStart={draggable ? startDrag(p) : undefined}
+          onClick={() => onSelect?.(p)}
+          disabled={!onSelect}
+          aria-pressed={onSelect ? selectedId === p.player_id : undefined}
+        >
+          <span className="shirt" style={newIds?.has(p.player_id) ? { boxShadow: "0 0 0 3px var(--lime)" } : undefined}>
+            {short(p, fixtures)}
+          </span>
+          <span>
+            <span className="nm">
+              {p.web_name} {f && <span className="badge warn">{f.text}</span>}
+            </span>
+            <br />
+            <span className="sub">
+              {fx.label ? `${fx.label} · ` : ""}
+              {projection(p)}
+            </span>
+          </span>
+        </button>
       </div>
-      {!compact && (
-        <div className="pmeta">
-          {POS_SHORT[p.element_type]} · {p.team_name?.slice(0, 3).toUpperCase()} · {cost(p.now_cost)}
-        </div>
-      )}
-      <div className="ptags">
-        {p.is_captain ? <span className="badge c">C</span> : null}{" "}
-        {p.is_vice_captain ? <span className="badge vc">VC</span> : null} {statusBadge(p)}
-      </div>
-    </div>
-  );
+    );
+  };
+
+  const rows = [1, 2, 3, 4].map((pos) => xi.filter((p) => p.element_type === pos));
 
   return (
-    <div className="pitch">
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <div
+        className={`pitch ${compact ? "compact" : ""}`}
         onDragOver={draggable && onMoveToXi ? (e) => e.preventDefault() : undefined}
         onDrop={
           draggable && onMoveToXi
@@ -105,19 +150,25 @@ export default function PitchView({
             : undefined
         }
       >
-        {rows.map((r) => {
-          const row = xi.filter((p) => p.element_type === r.pos);
-          return (
-            <div className="pitch-row" key={r.pos}>
-              {row.length === 0 && <span className="muted small">no {r.label}</span>}
-              {row.map((p) => card(p))}
+        <div className="pitch-lines" />
+        <div className="pitch-half" />
+        <div className="pitch-circle" />
+        <div className="pitch-box top" />
+        <div className="pitch-box bottom" />
+        <div className="pitch-rows">
+          {rows.map((row, i) => (
+            <div className="pitch-row" key={i}>
+              {row.length === 0 ? (
+                <span className="small" style={{ color: "#ffffffaa" }}>no {POS_NAME[i + 1]}</span>
+              ) : (
+                row.map(token)
+              )}
             </div>
-          );
-        })}
+          ))}
+        </div>
       </div>
       <div
-        className="pitch-row"
-        style={{ borderTop: "1px dashed var(--border)", paddingTop: 8 }}
+        className="bench"
         onDragOver={draggable && onMoveToBench ? (e) => e.preventDefault() : undefined}
         onDrop={
           draggable && onMoveToBench
@@ -129,8 +180,9 @@ export default function PitchView({
             : undefined
         }
       >
-        {bench.length === 0 && <span className="muted small">bench empty</span>}
-        {bench.map((p, i) => card(p, i))}
+        {bench.length === 0 && <span className="small muted">Bench empty</span>}
+        {gkSub && benchCard(gkSub, "GK SUB", true)}
+        {outfieldSubs.map((p, i) => benchCard(p, `SUB ${i + 1}`, false))}
       </div>
     </div>
   );

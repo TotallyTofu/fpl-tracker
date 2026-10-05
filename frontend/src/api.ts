@@ -12,8 +12,10 @@ import type {
   Season,
   SettingsResponse,
   Signal,
+  SourcesResponse,
   StartupRefreshState,
   Suggestion,
+  TeamFixturesResponse,
 } from "./types";
 
 export class ApiError extends Error {
@@ -53,6 +55,8 @@ export const api = {
   getSeason: () => req<Season>("/meta/season"),
   getHealth: () => req<Health>("/meta/health"),
   getStartupRefresh: () => req<StartupRefreshState>("/meta/startup-refresh"),
+  getSources: () => req<SourcesResponse>("/meta/sources"),
+  getTeamFixtures: (count = 3) => req<TeamFixturesResponse>(`/meta/team-fixtures?count=${count}`),
   refresh: (source: string) =>
     req<{ results: Record<string, string | { status: string; rows?: number; [k: string]: unknown }> }>(
       `/refresh/${source}`,
@@ -71,6 +75,9 @@ export const api = {
     const qs = q.toString();
     return req<{ items: RawItem[]; count: number }>(`/items${qs ? `?${qs}` : ""}`);
   },
+  dismissSignal: (id: number) => req<{ dismissed: number }>(`/signals/${id}`, { method: "DELETE" }),
+  requeueSkipped: (days = 7) =>
+    req<{ requeued: number; signals_removed: number }>(`/items/requeue-skipped?days=${days}`, { method: "POST" }),
   fetchItemBody: (id: number) =>
     req<{ body: string; truncated: boolean }>(`/items/${id}/fetch-body`, { method: "POST" }),
 
@@ -117,8 +124,8 @@ export const api = {
       body: JSON.stringify({ names }),
     }),
 
-  generateSuggestions: (body: { lineup_id: number; target_gw?: number }) =>
-    req<{ suggestions: Suggestion[]; target_gw: number }>("/suggestions/generate", {
+  generateSuggestions: (body: { lineup_id: number; target_gw?: number; chip?: string | null }) =>
+    req<{ suggestions: Suggestion[]; target_gw: number; chip: string | null }>("/suggestions/generate", {
       method: "POST",
       body: JSON.stringify(body),
     }),

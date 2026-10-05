@@ -75,6 +75,30 @@ async def get_db_stats() -> dict:
     }
 
 
+@router.get("/meta/team-fixtures")
+async def get_team_fixtures(count: int = 3) -> dict:
+    """Each club's next ``count`` gameweeks from the next GW: opponent short
+    name, home/away and FPL difficulty (1–5). A GW with no fixture is a blank."""
+    season = season_svc.current_season()
+    start = season.get("next_gw") or season.get("current_gw")
+    teams = {r["id"]: {"short": r["short_name"], "name": r["name"]}
+             for r in query("SELECT id, name, short_name FROM teams")}
+    out: dict[int, list[dict]] = {t: [] for t in teams}
+    if start:
+        count = max(1, min(count, 8))
+        rows = query(
+            "SELECT event, home_team, away_team, difficulty_home, difficulty_away, kickoff_time "
+            "FROM fixtures WHERE event BETWEEN ? AND ? ORDER BY event, kickoff_time",
+            (start, start + count - 1))
+        for r in rows:
+            for team, opp, home, d in ((r["home_team"], r["away_team"], True, r["difficulty_home"]),
+                                       (r["away_team"], r["home_team"], False, r["difficulty_away"])):
+                if team in out:
+                    out[team].append({"gw": r["event"], "opp": teams.get(opp, {}).get("short", "?"),
+                                      "home": home, "d": d or 3})
+    return {"from_gw": start, "count": count, "teams": teams, "fixtures": out}
+
+
 _SOURCES = ("fpl-official", "bbc", "espn", "reddit", "youtube")
 
 

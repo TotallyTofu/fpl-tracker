@@ -78,12 +78,19 @@ export interface LineupPlayer {
   is_captain: boolean;
   is_vice_captain: boolean;
   bought_cost: number | null;
+  /** v1.0 display extras from GET /lineups/{id} */
+  form?: number | null;
+  points_per_game?: number | null;
+  news?: string | null;
+  team_short?: string | null;
+  /** solver projection (suggested squads only) */
+  ep?: number;
 }
 
 // A23: a suggested squad (SuggestedLineup.squad) is a LineupPlayer minus
 // bought_cost — purchase prices only exist for stored lineups, and the solver
 // has no way to know them for players you don't own yet.
-export type SquadPlayer = Omit<LineupPlayer, "bought_cost">;
+export type SquadPlayer = Omit<LineupPlayer, "bought_cost"> & { bought_cost?: number | null };
 
 export interface Lineup {
   id: number;
@@ -96,13 +103,18 @@ export interface Lineup {
   updated_at: string;
   players: LineupPlayer[];
   validation: { valid: boolean; errors: RuleError[] };
+  /** money in the bank (£0.1m): the user's figure, else the £100m − squad estimate */
   budget_remaining: number;
+  bank_money: number | null;
+  bank_gw: number | null;
+  money_known: boolean;
 }
 
 export interface LineupSummary {
   id: number;
   name: string;
   transfer_bank: number;
+  bank_money?: number | null;
   chips: Record<string, number>;
   is_current: number;
   kind: "current" | "test";
@@ -134,6 +146,8 @@ export interface Diff {
   penalty_points: number;
   transfer_cap_exceeded?: boolean;
   chip_covers?: boolean;
+  chip_played?: string | null;
+  money_known?: boolean;
   bank_before?: number;
   budget_before?: number;
   budget_after?: number;
@@ -165,6 +179,8 @@ export interface Suggestion {
     with_captain: number;
     penalty_points?: number;
     net_after_transfers?: number;
+    /** projected points of the saved team unchanged (same model) */
+    current_team?: number | null;
   };
   objective: number;
   diff: Diff;
@@ -204,6 +220,8 @@ export interface LLMConfig {
   batch_chars: number;
   max_tokens: number;
   player_list_mode: string; // "filtered" | "full"
+  disable_thinking?: boolean;
+  llm_wait_hours?: number;
 }
 
 export interface YouTubeChannel {
@@ -222,6 +240,8 @@ export interface EspnSource {
   enabled: boolean;
   news_interval_min: number;
   live_interval_sec: number;
+  fetch_bodies?: boolean;
+  max_bodies_per_poll?: number;
 }
 
 export interface BbcSource {
@@ -345,6 +365,8 @@ export interface SettingsResponse {
     key_set: boolean;
     note: string;
   };
+  reddit_status?: { secret_set: boolean };
+  pulp_available?: boolean;
 }
 
 export interface DbStats {
@@ -364,8 +386,8 @@ export interface Signal {
   player_id: number;
   web_name: string | null;
   team_code: string | null;
-  category: "injury" | "suspension" | "selection" | "return" | "transfer" | "other";
-  sentiment: "positive" | "negative";
+  category: "injury" | "suspension" | "selection" | "rotation" | "return" | "transfer" | "other";
+  sentiment: "positive" | "negative" | "neutral";
   confidence: number;
   summary: string;
   source: string;
@@ -423,3 +445,79 @@ export function fmtTime(iso: string | null): string {
   const d = new Date(iso);
   return d.toLocaleString();
 }
+
+export interface SourceHealth {
+  source: "fpl-official" | "bbc" | "espn" | "reddit" | "youtube";
+  enabled: boolean;
+  last_poll: { status: string; rows: number | null; error: string | null; finished_at: string } | null;
+  items: number;
+  last_item: string | null;
+  waiting: number;
+  undated: number;
+  skipped_by_llm_breaker: number;
+  live_signals: number;
+}
+
+export interface SourcesResponse {
+  sources: SourceHealth[];
+  llm: {
+    ready: boolean;
+    model: string | null;
+    base_url: string;
+    disable_thinking: boolean;
+    ok_7d: number;
+    errors_7d: number;
+    last: { status: string; error: string | null; finished_at: string } | null;
+  };
+}
+
+export interface TeamFixture {
+  gw: number;
+  opp: string;
+  home: boolean;
+  d: number;
+}
+
+export interface TeamFixturesResponse {
+  from_gw: number | null;
+  count: number;
+  teams: Record<string, { short: string; name: string }>;
+  fixtures: Record<string, TeamFixture[]>;
+}
+
+export const CHIP_LABEL: Record<string, string> = {
+  wildcard: "Wildcard",
+  freehit: "Free Hit",
+  bboost: "Bench Boost",
+  triple_captain: "Triple Captain",
+};
+
+export const PROFILE_LABEL: Record<string, string> = {
+  max_ep: "Best projected",
+  differential: "Differential",
+  safe: "Safe",
+};
+
+/** "£4.5m" from £0.1m units, or "—". */
+export function money(m: number | null | undefined): string {
+  return m == null ? "—" : `£${(m / 10).toFixed(1)}m`;
+}
+
+/** Signed one-decimal number: +2.8 / −1.2 / 0.0 */
+export function signed(n: number): string {
+  if (Math.abs(n) < 0.05) return "0.0";
+  return `${n > 0 ? "+" : "−"}${Math.abs(n).toFixed(1)}`;
+}
+
+/** Player's fixture label for a GW: "ARS (H)" + difficulty class. */
+export function fixtureFor(fx: TeamFixturesResponse | null, team: number, gw?: number | null):
+  { label: string; cls: string } {
+  const list = fx?.fixtures[String(team)] ?? [];
+  const mine = gw ? list.filter((f) => f.gw === gw) : list.slice(0, 1);
+  if (!fx) return { label: "", cls: "" };
+  if (!mine.length) return { label: "blank", cls: "blank" };
+  if (mine.length > 1) return { label: mine.map((f) => f.opp).join("+"), cls: `d${Math.min(...mine.map((f) => f.d))}` };
+  const f = mine[0];
+  return { label: `${f.opp} (${f.home ? "H" : "A"})`, cls: `d${f.d}` };
+}
+

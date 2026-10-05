@@ -17,7 +17,7 @@ import type {
   YouTubeSource,
 } from "../types";
 
-type Draft = Omit<SettingsResponse, "llm_status">;
+type Draft = Omit<SettingsResponse, "llm_status" | "reddit_status" | "pulp_available">;
 
 function fmtBytes(n: number) {
   if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
@@ -28,6 +28,7 @@ function fmtBytes(n: number) {
 export default function Settings() {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [status, setStatus] = useState<SettingsResponse["llm_status"] | null>(null);
+  const [redditSecretSet, setRedditSecretSet] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
@@ -41,9 +42,10 @@ export default function Settings() {
     api
       .getSettings()
       .then((r) => {
-        const { llm_status, ...rest } = r;
+        const { llm_status, reddit_status, pulp_available: _p, ...rest } = r;
         setDraft(rest);
         setStatus(llm_status);
+        setRedditSecretSet(Boolean(reddit_status?.secret_set));
       })
       .catch(() => {});
     api.getDbStats().then(setStats).catch(() => {});
@@ -94,11 +96,12 @@ export default function Settings() {
     setSaveMsg(null);
     try {
       const updated = await api.putSettings(draft);
-      const { llm_status, ...rest } = updated;
+      const { llm_status, reddit_status, pulp_available: _p, ...rest } = updated;
       setDraft(rest);
       setStatus(llm_status);
+      setRedditSecretSet(Boolean(reddit_status?.secret_set));
       setDirty(false);
-      setSaveMsg("Saved — config.json updated on disk.");
+      setSaveMsg("Saved to config.json. Weights apply on the next plan; source intervals after a restart.");
     } catch (e) {
       setSaveMsg(`Save failed: ${e}`);
     } finally {
@@ -164,7 +167,7 @@ export default function Settings() {
   const weightsOk = Math.abs(weightsSum - 1) <= 0.01;
 
   return (
-    <div>
+    <div className="page settings">
       <div className="row" style={{ alignItems: "center", gap: 12 }}>
         <h1 style={{ margin: 0 }}>Settings</h1>
         <span className="spacer" />
@@ -261,6 +264,26 @@ export default function Settings() {
             />
           </div>
           <div>
+            <label>
+              <input
+                type="checkbox"
+                checked={draft.llm.disable_thinking ?? true}
+                onChange={(e) => upLlm({ disable_thinking: e.target.checked })}
+              />{" "}
+              turn off the model's "thinking"
+            </label>
+            <div className="small muted">Recommended. Thinking models (Gemma 4, Qwen 3) otherwise reason for minutes and run out of room before answering.</div>
+          </div>
+          <div>
+            <label>Wait for a failing LLM (hours)</label>
+            <input
+              type="number"
+              min={0}
+              value={draft.llm.llm_wait_hours ?? 6}
+              onChange={(e) => upLlm({ llm_wait_hours: Number(e.target.value) })}
+            />
+          </div>
+          <div>
             <label>Player list mode</label>
             <select value={draft.llm.player_list_mode} onChange={(e) => upLlm({ player_list_mode: e.target.value })}>
               <option value="filtered">filtered (only players named in the item)</option>
@@ -269,9 +292,9 @@ export default function Settings() {
           </div>
         </div>
         <div className="small muted" style={{ marginTop: 6 }}>
-          Max tokens is the per-request output budget — thinking models spend it on reasoning before answering, so
-          raise it if extraction logs “empty content”. Filtered mode skips the LLM call entirely when the item names
-          no player.
+          Max tokens is the per-request output budget; 2048 is plenty with thinking turned off. Filtered mode skips
+          the LLM call when the item names no player. While the LLM is failing, new items wait for it; after the
+          wait time above they fall back to keyword matching.
         </div>
         <div className="row" style={{ marginTop: 10 }}>
           <button className="ghost" onClick={testLlm} disabled={testing}>
@@ -323,7 +346,28 @@ export default function Settings() {
               onChange={(e) => upEspn({ news_interval_min: Number(e.target.value) })}
             />
           </label>
-          <span className="small muted">off by default — ESPN returned 403 from this network (verified 2026-09-19)</span>
+          <label>
+            <input
+              type="checkbox"
+              checked={s.espn.fetch_bodies ?? true}
+              onChange={(e) => upEspn({ fetch_bodies: e.target.checked })}
+            />{" "}
+            fetch full stories
+          </label>
+          <label>
+            max stories/poll{" "}
+            <input
+              type="number"
+              min={0}
+              style={{ width: 60 }}
+              value={s.espn.max_bodies_per_poll ?? 10}
+              onChange={(e) => upEspn({ max_bodies_per_poll: Number(e.target.value) })}
+            />
+          </label>
+        </div>
+        <div className="small muted" style={{ marginTop: 6 }}>
+          Premier League news with full story text (injury round-ups especially). If ESPN blocks your network the
+          poll log shows the error and the other sources carry on.
         </div>
 
         <h3>BBC Sport (RSS)</h3>
@@ -366,7 +410,7 @@ export default function Settings() {
           politeness) so the extractors see the whole story, not just the RSS blurb.
         </div>
 
-        <h3>Reddit r/FantasyPL (RSS)</h3>
+        <h3>Reddit r/FantasyPL</h3>
         <div className="row" style={{ gap: 16 }}>
           <label>
             <input type="checkbox" checked={s.reddit.enabled} onChange={(e) => upReddit({ enabled: e.target.checked })} />{" "}
@@ -405,6 +449,7 @@ export default function Settings() {
               type="password"
               value={s.reddit.oauth_client_secret}
               disabled={s.reddit.mode !== "oauth"}
+              placeholder={redditSecretSet ? "saved: leave blank to keep it" : ""}
               onChange={(e) => upReddit({ oauth_client_secret: e.target.value })}
             />
           </div>
@@ -752,7 +797,7 @@ export default function Settings() {
       <div className="panel">
         <h2 style={{ marginTop: 0 }}>About</h2>
         <div className="small">
-          <b>FPL Tracker v1.0.2</b> — local-first FPL team optimizer. No FPL login by design: data comes from public
+          <b>FPL Tracker v1.0.0</b> — local-first FPL team optimizer. No FPL login by design: data comes from public
           endpoints only, and your API key (if any) is stored in this machine's config.json / .env and sent only to
           your LLM endpoint.
         </div>
@@ -792,16 +837,16 @@ export default function Settings() {
             </tr>
             <tr>
               <td>ESPN</td>
-              <td>REST (opt-in)</td>
+              <td>REST + full stories</td>
               <td>30 min</td>
-              <td>disabled by default (403 on this network)</td>
+              <td>browser user agent, capped story fetches</td>
             </tr>
           </tbody>
         </table>
         <div className="small muted" style={{ marginTop: 10 }}>
           Suggestions are projections, not guarantees — verify news on the official FPL site before the deadline.
-          Design docs live in the repo: <span className="mono">OUTLINE.MD</span>, <span className="mono">PLAN.MD</span>–
-          <span className="mono">PLAN-5-M4-POLISH.MD</span>.
+          The server only answers on this computer (127.0.0.1), refuses requests from other websites, and never
+          returns your API key or Reddit secret.
         </div>
       </div>
     </div>

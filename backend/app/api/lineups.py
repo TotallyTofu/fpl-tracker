@@ -125,6 +125,9 @@ def _load_lineup(lid: int) -> dict | None:
            ORDER BY (lp.role = 'bench'), lp.bench_order, p.ep_next DESC""",
         (lid,),
     )
+    for p in pps:   # stored as 0/1 — the API contract (LineupPlayer) is boolean
+        p["is_captain"] = bool(p["is_captain"])
+        p["is_vice_captain"] = bool(p["is_vice_captain"])
     row["players"] = pps
     squad = [
         {

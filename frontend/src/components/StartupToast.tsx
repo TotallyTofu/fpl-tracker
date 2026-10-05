@@ -62,7 +62,7 @@ export default function StartupToast() {
   if (state.status === "running") {
     return (
       <div className="startup-toast running" role="status">
-        📡 Full news refresh running… (BBC · Reddit · YouTube + signals)
+        <span className="spinner" /> Fetching the latest news (BBC · ESPN · Reddit · YouTube)…
       </div>
     );
   }
@@ -74,11 +74,11 @@ export default function StartupToast() {
     return (
       <div className="startup-toast done" role="status">
         <span>
-          ✅ News refresh complete — {parts}
+          News updated: {parts}
           {state.signals_stored ? ` · ${state.signals_stored} signal(s) stored` : ""}
         </span>
         <button className="toast-close" onClick={() => setDismissed(true)} aria-label="Dismiss">
-          ✕
+          Close
         </button>
       </div>
     );

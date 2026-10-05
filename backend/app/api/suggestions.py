@@ -170,6 +170,7 @@ async def generate(body: dict) -> dict:
                                    chips, target_gw)
 
     current_proj = _current_projection(lid, next((v for v in results.values() if v), None), chip)
+    ts = now_utc()   # one timestamp per run, so the UI can group the plans of a run
 
     out = []
     for profile in PROFILES:
@@ -222,7 +223,6 @@ async def generate(body: dict) -> dict:
         if not diff["money_known"]:
             rationale["notes"].append("Money in the bank is not set, so it is estimated as "
                                       "£100m minus your squad's price. Add it in My Team.")
-        ts = now_utc()
         raw = {"squad": s.squad, "xi": s.xi, "captain": s.captain,
                "vice_captain": s.vice_captain, "bench": s.bench}
         sid = execute(

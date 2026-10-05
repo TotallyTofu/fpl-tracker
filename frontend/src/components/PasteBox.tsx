@@ -38,8 +38,8 @@ export default function PasteBox({ onLoad }: Props) {
   };
 
   return (
-    <div className="panel">
-      <h2 style={{ marginTop: 0 }}>Paste a team list</h2>
+    <div className="card">
+      <h2>Paste a team list</h2>
       <textarea
         rows={6}
         placeholder={"One player per line, e.g.\nHaaland\nSaka\nKovacic"}
@@ -76,13 +76,13 @@ export default function PasteBox({ onLoad }: Props) {
                     <td>{m.input}</td>
                     <td>
                       {m.matched ? (
-                        <span className="ok">✅ {m.matched.web_name}</span>
+                        <span className="badge ok">{m.matched.web_name}</span>
                       ) : m.candidates.length === 1 ? (
-                        <span className="yellow">🔍 {m.candidates[0].web_name}</span>
+                        <span className="badge warn">Maybe {m.candidates[0].web_name}</span>
                       ) : ambiguous ? (
-                        <span className="yellow">🔍 ambiguous — pick one</span>
+                        <span className="badge warn">Several matches: pick one</span>
                       ) : (
-                        <span className="err">❌ no match</span>
+                        <span className="badge out">No match</span>
                       )}
                     </td>
                     <td className="muted">
@@ -108,8 +108,8 @@ export default function PasteBox({ onLoad }: Props) {
           </tbody>
         </table>
       )}
-      <div className="small muted" style={{ marginTop: 6 }}>
-        Ambiguous or unmatched names: resolve them via the player picker below.
+      <div className="help" style={{ marginTop: 8 }}>
+        Names that don't match: find them with the player search.
       </div>
     </div>
   );

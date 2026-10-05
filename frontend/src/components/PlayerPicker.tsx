@@ -44,25 +44,28 @@ export default function PlayerPicker({ squad, selectedId, onAdd, onSwap }: Props
   };
 
   return (
-    <div className="panel">
+    <div className="card">
       <div className="row" style={{ marginBottom: 8 }}>
+        <label htmlFor="picker-search" className="sr-only">Search players</label>
         <input
+          id="picker-search"
+          type="search"
           style={{ flex: 1, minWidth: 180 }}
           placeholder="Search players…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <div className="tabs" style={{ marginBottom: 0 }}>
+        <div className="seg" role="group" aria-label="Position">
           {POS_TABS.map((p) => (
-            <span key={p} className={`tab ${pos === p ? "active" : ""}`} onClick={() => setPos(p)}>
+            <button key={p} type="button" className="sm" aria-pressed={pos === p} onClick={() => setPos(p)}>
               {p === 0 ? "All" : POS_NAME[p]}
-            </span>
+            </button>
           ))}
         </div>
       </div>
       {sel && (
         <div className="small muted" style={{ marginBottom: 6 }}>
-          Selected: <b className="text">{sel.web_name}</b> — click a player below to swap
+          Swapping <b>{sel.web_name}</b>: click a {POS_NAME[sel.element_type]} below
         </div>
       )}
       <div style={{ maxHeight: 320, overflowY: "auto" }}>
@@ -72,9 +75,9 @@ export default function PlayerPicker({ squad, selectedId, onAdd, onSwap }: Props
               <th>Name</th>
               <th>Pos</th>
               <th>Club</th>
-              <th>Cost</th>
-              <th>EP</th>
-              <th>Own %</th>
+              <th className="num">Price</th>
+              <th className="num">FPL xP</th>
+              <th className="num">Owned</th>
               <th>Status</th>
             </tr>
           </thead>
@@ -82,7 +85,7 @@ export default function PlayerPicker({ squad, selectedId, onAdd, onSwap }: Props
             {busy && (
               <tr>
                 <td colSpan={7} className="muted">
-                  <span className="spinner" /> loading…
+                  <span className="spinner" /> Loading…
                 </td>
               </tr>
             )}
@@ -101,21 +104,19 @@ export default function PlayerPicker({ squad, selectedId, onAdd, onSwap }: Props
                   >
                     <td>{p.web_name}</td>
                     <td>
-                      <span className={`badge ${["", "gk", "def", "mid", "fwd"][p.element_type]}`}>
-                        {POS_NAME[p.element_type]}
-                      </span>
+                      <span className="badge">{POS_NAME[p.element_type]}</span>
                     </td>
                     <td>{p.team_name}</td>
-                    <td>{cost(p.now_cost)}</td>
-                    <td>{p.ep_next != null ? p.ep_next.toFixed(1) : "—"}</td>
-                    <td>{p.selected_by_percent != null ? p.selected_by_percent.toFixed(1) : "—"}</td>
+                    <td className="num">{cost(p.now_cost)}</td>
+                    <td className="num">{p.ep_next != null ? p.ep_next.toFixed(1) : "—"}</td>
+                    <td className="num">{p.selected_by_percent != null ? `${p.selected_by_percent.toFixed(1)}%` : "—"}</td>
                     <td>
                       {p.status === "u" || p.status === "s" || p.can_select === 0 ? (
-                        <span className="badge out">out</span>
+                        <span className="badge out">Out</span>
                       ) : p.status === "d" || p.chance_of_playing_next_round === 50 ? (
-                        <span className="badge warn">doubt</span>
+                        <span className="badge warn">Doubt</span>
                       ) : (
-                        <span className="muted">ok</span>
+                        <span className="badge ok">Fit</span>
                       )}
                     </td>
                   </tr>

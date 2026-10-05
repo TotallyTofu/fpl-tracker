@@ -19,9 +19,10 @@ export function validateClient(players: LineupPlayer[], bank: number): RuleError
     if (comp[pos] !== SQUAD_COMP[pos])
       errors.push({ code: "SQUAD_COMPOSITION", message: `Squad must be 2 GK / 5 DEF / 5 MID / 3 FWD (got ${comp[1]}/${comp[2]}/${comp[3]}/${comp[4]})`, severity: "error" });
 
+  // v1.0: a real squad can be worth more than £100m after price rises — a warning, not an error.
   const total = players.reduce((s, p) => s + p.now_cost, 0);
   if (total > BUDGET)
-    errors.push({ code: "BUDGET_EXCEEDED", message: `Squad costs £${(total / 10).toFixed(1)}m (max £100.0m)`, severity: "error" });
+    errors.push({ code: "BUDGET_EXCEEDED", message: `Squad is worth £${(total / 10).toFixed(1)}m, over the £100.0m starting budget. Fine if your players have risen in price.`, severity: "warning" });
 
   const clubs: Record<number, number> = {};
   for (const p of players) clubs[p.team] = (clubs[p.team] || 0) + 1;
@@ -37,6 +38,9 @@ export function validateClient(players: LineupPlayer[], bank: number): RuleError
   const orders = bench.map((p) => p.bench_order).sort((a, b) => (a || 0) - (b || 0));
   if (bench.length === 4 && JSON.stringify(orders) !== JSON.stringify([1, 2, 3, 4]))
     errors.push({ code: "BENCH_ORDER", message: "Bench orders must be 1–4, unique", severity: "error" });
+  const benchGks = bench.filter((p) => p.element_type === 1);
+  if (bench.length === 4 && benchGks.length === 1 && benchGks[0].bench_order !== 1)
+    errors.push({ code: "BENCH_GK_SLOT", message: "The substitute goalkeeper must be in the first bench slot", severity: "error" });
 
   const xiGk = xi.filter((p) => p.element_type === 1).length;
   const xiDef = xi.filter((p) => p.element_type === 2).length;
@@ -55,7 +59,7 @@ export function validateClient(players: LineupPlayer[], bank: number): RuleError
   if (caps.length === 1 && vcs.length === 1 && caps[0].player_id === vcs[0].player_id)
     errors.push({ code: "CAPTAIN_VC_SAME", message: "Captain and vice-captain must be different players", severity: "error" });
 
-  if (bank < 1 || bank > 5) errors.push({ code: "BANK_RANGE", message: `Transfer bank must be 1–5 (got ${bank})`, severity: "error" });
+  if (bank < 0 || bank > 5) errors.push({ code: "BANK_RANGE", message: `Free transfers must be 0–5 (got ${bank})`, severity: "error" });
 
   for (const p of players)
     if (p.can_select === 0 || p.status === "u" || p.status === "s")
