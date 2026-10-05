@@ -115,7 +115,7 @@ export default function PitchView({
           disabled={!onSelect}
           aria-pressed={onSelect ? selectedId === p.player_id : undefined}
         >
-          <span className="shirt" style={newIds?.has(p.player_id) ? { boxShadow: "0 0 0 3px var(--lime)" } : undefined}>
+          <span className="shirt">
             {short(p, fixtures)}
           </span>
           <span>

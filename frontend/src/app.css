@@ -370,7 +370,7 @@ tr.selected { background: var(--good-bg); }
   font-family: var(--font-display); font-weight: 700; font-size: 16px;
   box-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
 }
-.token.new .shirt { box-shadow: 0 0 0 3px var(--lime); }
+.token.new .shirt, .bench-card.new .shirt { background: #35d26b; color: #062b12; box-shadow: 0 1px 0 rgba(0, 0, 0, 0.25); }
 .token.selected .shirt { box-shadow: 0 0 0 3px #8fb4ff; }
 .armband {
   position: absolute; top: -7px; right: -10px; width: 24px; height: 24px; border-radius: 50%;
@@ -412,7 +412,7 @@ tr.selected { background: var(--good-bg); }
 .bench-card .sub { font-size: 12px; color: var(--muted); }
 
 .legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 13px; color: var(--muted); align-items: center; }
-.legend .dot { width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 3px var(--lime); display: inline-block; }
+.legend .dot { width: 14px; height: 14px; border-radius: 50%; background: #35d26b; display: inline-block; }
 
 /* ------------------------------------------------------------ misc (kept) */
 .err { color: var(--bad); font-size: 14px; margin: 4px 0; }
