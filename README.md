@@ -259,3 +259,8 @@ frontend/src/
 Design and history: [`PLAN.MD`](PLAN.MD) (rules engine, schema, API spec),
 [`FIX.MD`](FIX.MD) (the rev 2–3 audit), [`ACCEPTANCE.md`](ACCEPTANCE.md) and
 [`archive/`](archive/) (original plans).
+
+## License
+
+[MIT](LICENSE). Not affiliated with the Premier League or Fantasy Premier League;
+FPL data comes from its public API and belongs to its owners.
