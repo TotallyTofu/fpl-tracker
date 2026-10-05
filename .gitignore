@@ -21,10 +21,3 @@ probe_sources.py
 .playwright-mcp/
 # pytest temp dirs (when the system temp dir is not writable)
 pytest-of-*/
-
-# banner working files (source artwork, screenshots)
-/arsenalpromo.jpg
-/banner.png
-/mockup-banner.png
-/website with current banner.png
-/scripts/
