@@ -7,9 +7,11 @@
       "live_matches_interval_sec": 30
     },
     "espn": {
-      "enabled": false,
+      "enabled": true,
       "news_interval_min": 30,
-      "live_interval_sec": 30
+      "live_interval_sec": 30,
+      "fetch_bodies": true,
+      "max_bodies_per_poll": 10
     },
     "bbc": {
       "enabled": true,
@@ -41,7 +43,7 @@
         "review"
       ],
       "max_transcripts_per_poll": 3,
-      "llm_truncate_chars": 12000
+      "llm_truncate_chars": 60000
     }
   },
   "llm": {
@@ -49,10 +51,18 @@
     "base_url": "http://localhost:8888/v1",
     "api_key": "",
     "model": "",
-    "timeout_sec": 60,
+    "timeout_sec": 300,
     "batch_chars": 8000,
-    "max_tokens": 8192,
-    "player_list_mode": "filtered"
+    "max_tokens": 2048,
+    "player_list_mode": "filtered",
+    "stream_idle_timeout_sec": 90,
+    "chunk_wallclock_sec": 300,
+    "retries": 2,
+    "fallback_full_list": true,
+    "truncate_chars": 8000,
+    "extract_timebox_sec": 480,
+    "disable_thinking": true,
+    "llm_wait_hours": 6
   },
   "optimizer": {
     "weights": {
@@ -81,7 +91,8 @@
     "solver": {
       "restarts": 20,
       "timebox_sec": 8,
-      "seed": 42
+      "seed": 42,
+      "max_moves_per_restart": 2000
     }
   },
   "group": {
