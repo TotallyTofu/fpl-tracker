@@ -292,3 +292,14 @@ def test_lineup_flags_are_booleans(client):
     lid = client.post("/api/lineups", json=BODY).json()["id"]
     players = client.get(f"/api/lineups/{lid}").json()["players"]
     assert all(isinstance(p["is_captain"], bool) and isinstance(p["is_vice_captain"], bool) for p in players)
+
+
+def test_requeue_many_items_in_one_transaction(db_path):
+    """170 skipped items re-queued in one UPDATE (the real-world 500: SQLite
+    needed a temp file the OS refused; get_conn keeps temp data in memory)."""
+    from app.signals.pipeline import requeue_skipped
+    for i in range(170):
+        item = ingest.ingest_item("bbc", f"b{i}", "article", f"t{i}", None, RECENT, "body")
+        ingest.mark_processed(item, ["LLM skipped this pass: circuit breaker open (≥2 failures)"])
+    assert requeue_skipped(7)["requeued"] == 170
+    assert dbmod.query_one("SELECT COUNT(*) AS n FROM raw_items WHERE processed = 0")["n"] == 170

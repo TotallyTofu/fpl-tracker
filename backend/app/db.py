@@ -462,6 +462,10 @@ def get_conn(path: str | Path | None = None) -> sqlite3.Connection:
             conn = sqlite3.connect(p, timeout=15)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys=ON")
+            # Keep SQLite's temporary files (statement journals for big
+            # multi-row updates, sorts) in memory: an unwritable Windows temp
+            # folder otherwise fails them with "unable to open database file".
+            conn.execute("PRAGMA temp_store=MEMORY")
             return conn
         except sqlite3.OperationalError as e:
             if "unable to open" not in str(e).lower() or attempt == 5:
