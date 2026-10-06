@@ -13,6 +13,9 @@ suggests three transfer plans for your team that follow the FPL rules.
 
 Version **1.0.0**, built for the 2026/27 season rules. See [CHANGELOG.md](CHANGELOG.md).
 
+<img width="1275" height="1349" alt="image" src="https://github.com/user-attachments/assets/6d59914f-ebe4-464f-b32e-f0e4f300a052" />
+
+
 ## What you get
 
 | Page | What it does |
