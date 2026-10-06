@@ -82,13 +82,13 @@ LLM_MODEL=
 Any OpenAI-compatible `chat/completions` endpoint works (llama.cpp server,
 Unsloth Studio, LM Studio, vLLM, Ollama's OpenAI API…).
 
-1. Settings → LLM: base URL, model name, API key → Save → **Test connection**.
+1. Settings → LLM: supports OpenAI-compatible API (**Test connection** will ask the model to output ("Hello")
 2. Leave **turn off the model's "thinking"** on. Thinking models (Gemma 4,
    Qwen 3) otherwise reason for minutes on one article and run out of output
    budget before answering. The app sends
    `chat_template_kwargs: {"enable_thinking": false}` and retries without it if
    your server rejects the field.
-3. `max_tokens` 2048 is plenty with thinking off.
+3. `max_tokens` is defaulted to 2048 withh thinking off. You can change this on the Settings page or config.json
 
 When the LLM fails repeatedly, new items wait for it (up to
 `llm.llm_wait_hours`, default 6) before falling back to keyword matching. Items
