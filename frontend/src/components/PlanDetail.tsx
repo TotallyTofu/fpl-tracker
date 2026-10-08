@@ -6,7 +6,7 @@ import PitchView from "./PitchView";
 
 export interface Pair {
   out: { name: string; sell: number; ep: number | null } | null;
-  inn: { name: string; cost: number; ep: number | null; team: string } | null;
+  inn: { name: string; cost: number; ep: number | null; team: string; pStart: number | null } | null;
 }
 
 /** Pair each sale with a purchase of the same position (FPL transfers are
@@ -21,15 +21,15 @@ export function pairTransfers(s: Suggestion, current: LineupPlayer[]): Pair[] {
     const pos = posOf.get(o.player_id) ?? 0;
     const i = ins.findIndex((x) => x.pos === pos);
     const inn = i >= 0 ? ins.splice(i, 1)[0] : null;
-    const team = inn ? s.lineup.squad.find((p) => p.player_id === inn.player_id)?.team_name ?? "" : "";
+    const sq = inn ? s.lineup.squad.find((p) => p.player_id === inn.player_id) : undefined;
     pairs.push({
       out: { name: o.web_name, sell: o.sell_value, ep: o.ep ?? null },
-      inn: inn ? { name: inn.web_name, cost: inn.cost, ep: inn.ep ?? null, team } : null,
+      inn: inn ? { name: inn.web_name, cost: inn.cost, ep: inn.ep ?? null, team: sq?.team_name ?? "", pStart: sq?.p_start ?? null } : null,
     });
   }
   for (const inn of ins) {
-    const team = s.lineup.squad.find((p) => p.player_id === inn.player_id)?.team_name ?? "";
-    pairs.push({ out: null, inn: { name: inn.web_name, cost: inn.cost, ep: inn.ep ?? null, team } });
+    const sq = s.lineup.squad.find((p) => p.player_id === inn.player_id);
+    pairs.push({ out: null, inn: { name: inn.web_name, cost: inn.cost, ep: inn.ep ?? null, team: sq?.team_name ?? "", pStart: sq?.p_start ?? null } });
   }
   return pairs;
 }
@@ -76,6 +76,8 @@ export default function PlanDetail({ s, current, fixtures, canApply, onApplied }
   const pairs = pairTransfers(s, current);
   const steps = applySteps(s, current, pairs);
   const newIds = new Set(s.diff.transfers_in.map((t) => t.player_id));
+  // the keeps this plan was made with (not today's), absent on plans made before the feature
+  const keptIds = new Set(s.diff.kept_ids ?? []);
   const blocked = Boolean(s.diff.transfer_cap_exceeded);
   const label = PROFILE_LABEL[s.profile] ?? s.profile;
 
@@ -103,11 +105,12 @@ export default function PlanDetail({ s, current, fixtures, canApply, onApplied }
           <h2 id="plan-pitch-h" style={{ margin: 0 }}>{label}: your GW{s.target_gw} team</h2>
           <span className="legend">
             <span><span className="dot" /> new signing</span>
+            {keptIds.size > 0 && <span><span className="dot kept" /> kept by you</span>}
             <span><span className="badge warn">75%</span> injury flag</span>
             <span>number = projected points</span>
           </span>
         </div>
-        <PitchView players={s.lineup.squad as SquadPlayer[]} compact fixtures={fixtures} gw={s.target_gw} newIds={newIds} />
+        <PitchView players={s.lineup.squad as SquadPlayer[]} compact fixtures={fixtures} gw={s.target_gw} newIds={newIds} keptIds={keptIds} />
       </section>
 
       <div className="side">
@@ -128,7 +131,7 @@ export default function PlanDetail({ s, current, fixtures, canApply, onApplied }
                   <span className="who">
                     <span className="tag in">IN</span>
                     <b>{p.inn?.name ?? "—"}</b>
-                    {p.inn && <span className="meta">{money(p.inn.cost)}{p.inn.ep != null ? ` · ${p.inn.ep.toFixed(1)} pts` : ""}</span>}
+                    {p.inn && <span className="meta">{money(p.inn.cost)}{p.inn.ep != null ? ` · ${p.inn.ep.toFixed(1)} pts` : ""}{p.inn.pStart != null && p.inn.pStart < 0.8 ? ` · starts ~${Math.round(p.inn.pStart * 100)}%` : ""}</span>}
                   </span>
                   <span className={`gain ${gain != null && gain < 0 ? "neg" : ""}`}>{gain != null ? signed(gain) : ""}</span>
                 </div>

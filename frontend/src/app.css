@@ -388,6 +388,17 @@ tr.selected { background: var(--good-bg); }
 }
 .token.new .shirt, .bench-card.new .shirt { background: #35d26b; color: #062b12; box-shadow: 0 1px 0 rgba(0, 0, 0, 0.25); }
 .token.selected .shirt { box-shadow: 0 0 0 3px #8fb4ff; }
+/* Keep players in lineup: greyed shirt + lock (grey alone would read as "unavailable") */
+.token.kept .shirt, .bench-card.kept .shirt { background: #b9c3c9; color: #2a3338; }
+.token.kept .nameplate { background: #4a555c; }
+.lock-badge {
+  position: absolute; top: -7px; left: -10px; width: 22px; height: 22px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: #2a3338; color: #ffffff; box-shadow: 0 0 0 2px #ffffff;
+}
+.bench-card .lock-badge { width: 18px; height: 18px; top: -6px; left: -8px; }
+tr.kept td { background: var(--surface-2); }
+.legend .dot.kept { background: #b9c3c9; }
 .armband {
   position: absolute; top: -7px; right: -10px; width: 24px; height: 24px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
@@ -401,6 +412,8 @@ tr.selected { background: var(--good-bg); }
   font-size: 11px; font-weight: 800; padding: 0 4px; border-radius: 4px;
 }
 .flag-badge.out { background: #f4a07b; color: #3d1405; }
+/* v1.1 rotation risk: muted, so it never competes with an FPL injury flag */
+.flag-badge.risk { background: #dfe5e9; color: #2a3338; font-weight: 700; }
 .nameplate {
   max-width: 112px; background: #111518; color: #ffffff; font-size: 13px; font-weight: 600;
   padding: 3px 8px; border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;

@@ -1,0 +1,32 @@
+{
+  "elements": [
+    {
+      "id": 1,
+      "stats": {"minutes": 90, "goals_scored": 0, "assists": 0, "bonus": 1, "bps": 24, "starts": 1, "total_points": 6, "in_dreamteam": false, "played": true},
+      "explain": [{"fixture": 101, "stats": [{"identifier": "minutes", "points": 2, "value": 90}]}]
+    },
+    {
+      "id": 2,
+      "stats": {"minutes": 20, "goals_scored": 0, "assists": 0, "bonus": 0, "bps": 5, "starts": 0, "total_points": 1, "in_dreamteam": false, "played": true},
+      "explain": [{"fixture": 102, "stats": [{"identifier": "minutes", "points": 1, "value": 20}]}]
+    },
+    {
+      "id": 3,
+      "stats": {"minutes": 0, "goals_scored": 0, "assists": 0, "bonus": 0, "bps": 0, "starts": 0, "total_points": 0, "in_dreamteam": false, "played": false},
+      "explain": [{"fixture": 103, "stats": []}]
+    },
+    {
+      "id": 4,
+      "stats": {"minutes": 0, "goals_scored": 0, "assists": 0, "bonus": 0, "bps": 0, "starts": 0, "total_points": 0, "in_dreamteam": false, "played": false},
+      "explain": []
+    },
+    {
+      "id": 5,
+      "stats": {"minutes": 180, "goals_scored": 1, "assists": 0, "bonus": 3, "bps": 60, "starts": 2, "total_points": 14, "in_dreamteam": true, "played": true},
+      "explain": [
+        {"fixture": 104, "stats": [{"identifier": "minutes", "points": 2, "value": 90}]},
+        {"fixture": 105, "stats": [{"identifier": "minutes", "points": 2, "value": 90}]}
+      ]
+    }
+  ]
+}

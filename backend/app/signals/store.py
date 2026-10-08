@@ -135,6 +135,19 @@ def active_signals(player_id: int | None = None, team: str | None = None,
     return query(sql, params)
 
 
+def signals_by_player() -> dict[int, list[dict]]:
+    """Active (non-expired) signals grouped by player, newest first. What the
+    projection (suggestions and the projection log) prices in."""
+    rows = query(
+        "SELECT * FROM signals WHERE (expires_at IS NULL OR expires_at > ?) ORDER BY retrieved_at DESC",
+        (now_utc(),),
+    )
+    out: dict[int, list[dict]] = {}
+    for r in rows:
+        out.setdefault(r["player_id"], []).append(dict(r))
+    return out
+
+
 def expire_stale() -> int:
     """Delete expired signals. Returns count deleted."""
     from ..db import get_conn

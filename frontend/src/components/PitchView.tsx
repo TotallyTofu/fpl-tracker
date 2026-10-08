@@ -1,5 +1,5 @@
 import type { SquadPlayer, TeamFixturesResponse } from "../types";
-import { POS_NAME, fixtureFor, money } from "../types";
+import { POS_NAME, ROTATION_RISK, fixtureFor, money, startTitle } from "../types";
 
 // Accepts both stored LineupPlayer[] and suggested SquadPlayer[].
 interface Props {
@@ -16,7 +16,17 @@ interface Props {
   gw?: number | null;
   /** players to ring as new signings */
   newIds?: Set<number>;
+  /** players the plans never sell: greyed, with a lock */
+  keptIds?: Set<number>;
 }
+
+export const LockIcon = () => (
+  <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+    strokeWidth="2" aria-hidden="true">
+    <rect x="3" y="7" width="10" height="7" rx="1.5" />
+    <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" />
+  </svg>
+);
 
 function flag(p: SquadPlayer): { text: string; out: boolean } | null {
   if (p.status === "u" || p.status === "s" || p.can_select === 0 || p.chance_of_playing_next_round === 0)
@@ -25,6 +35,12 @@ function flag(p: SquadPlayer): { text: string; out: boolean } | null {
   if (p.status === "d" || p.status === "i" || (c != null && c < 100))
     return { text: c != null ? `${c}%` : "?", out: false };
   return null;
+}
+
+/** Rotation-risk chip: only when there is no FPL injury flag (the flag wins). */
+function rotationRisk(p: SquadPlayer): { text: string; title: string } | null {
+  if (flag(p) || p.p_start == null || p.p_start >= ROTATION_RISK) return null;
+  return { text: `~${Math.round(p.p_start * 100)}%`, title: startTitle(p) };
 }
 
 const projection = (p: SquadPlayer) => {
@@ -37,7 +53,7 @@ const short = (p: SquadPlayer, fx?: TeamFixturesResponse | null) =>
 
 export default function PitchView({
   players, selectedId, onSelect, onMoveToBench, onMoveToXi, onBenchReorder,
-  compact, fixtures, gw, newIds,
+  compact, fixtures, gw, newIds, keptIds,
 }: Props) {
   const draggable = Boolean(onMoveToBench || onMoveToXi);
   const xi = players.filter((p) => p.role === "starter");
@@ -54,8 +70,11 @@ export default function PitchView({
 
   const token = (p: SquadPlayer) => {
     const f = flag(p);
+    const risk = rotationRisk(p);
     const fx = fixtureFor(fixtures ?? null, p.team, gw);
-    const cls = ["token", newIds?.has(p.player_id) ? "new" : "", selectedId === p.player_id ? "selected" : ""].join(" ");
+    const kept = keptIds?.has(p.player_id) ?? false;
+    const cls = ["token", newIds?.has(p.player_id) ? "new" : "", kept ? "kept" : "",
+      selectedId === p.player_id ? "selected" : ""].join(" ");
     return (
       <button
         type="button"
@@ -66,13 +85,15 @@ export default function PitchView({
         onClick={() => onSelect?.(p)}
         disabled={!onSelect}
         aria-pressed={onSelect ? selectedId === p.player_id : undefined}
-        title={`${p.web_name} · ${POS_NAME[p.element_type]} · ${p.team_name ?? ""} · ${money(p.now_cost)}`}
+        title={`${p.web_name} · ${POS_NAME[p.element_type]} · ${p.team_name ?? ""} · ${money(p.now_cost)}${kept ? " · kept: plans never sell this player" : ""}`}
       >
         <span className="shirt">
           {short(p, fixtures)}
+          {kept && <span className="lock-badge" aria-label="Kept"><LockIcon /></span>}
           {p.is_captain ? <span className="armband" aria-label="Captain">C</span> : null}
           {p.is_vice_captain ? <span className="armband vc" aria-label="Vice-captain">V</span> : null}
           {f && <span className={`flag-badge ${f.out ? "out" : ""}`}>{f.text}</span>}
+          {risk && <span className="flag-badge risk" title={risk.title}>{risk.text}</span>}
         </span>
         <span className="nameplate">{p.web_name}</span>
         <span className="token-meta">
@@ -85,7 +106,9 @@ export default function PitchView({
 
   const benchCard = (p: SquadPlayer, label: string, isGk: boolean) => {
     const f = flag(p);
+    const risk = rotationRisk(p);
     const fx = fixtureFor(fixtures ?? null, p.team, gw);
+    const kept = keptIds?.has(p.player_id) ?? false;
     return (
       <div
         key={p.player_id}
@@ -108,19 +131,22 @@ export default function PitchView({
         <span className="bench-label">{label}</span>
         <button
           type="button"
-          className={`bench-card ${selectedId === p.player_id ? "selected" : ""} ${newIds?.has(p.player_id) ? "new" : ""}`}
+          className={`bench-card ${selectedId === p.player_id ? "selected" : ""} ${newIds?.has(p.player_id) ? "new" : ""} ${kept ? "kept" : ""}`}
           draggable={draggable}
           onDragStart={draggable ? startDrag(p) : undefined}
           onClick={() => onSelect?.(p)}
           disabled={!onSelect}
           aria-pressed={onSelect ? selectedId === p.player_id : undefined}
+          title={kept ? `${p.web_name} · kept: plans never sell this player` : undefined}
         >
           <span className="shirt">
             {short(p, fixtures)}
+            {kept && <span className="lock-badge" aria-label="Kept"><LockIcon /></span>}
           </span>
           <span>
             <span className="nm">
               {p.web_name} {f && <span className="badge warn">{f.text}</span>}
+              {risk && <span className="badge outline" title={risk.title}>{risk.text}</span>}
             </span>
             <br />
             <span className="sub">

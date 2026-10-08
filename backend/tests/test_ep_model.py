@@ -1,10 +1,14 @@
 """EP model tests: deterministic, config-driven (PLAN-2 T1.16)."""
+import types
+
 import pytest
 
 from app.optimizer.scoring import (
     availability_multiplier,
     ep_final,
     ep_baseline,
+    ep_next_unflagged,
+    play_factor,
     score_lineup,
     signal_adjustment,
 )
@@ -85,25 +89,77 @@ def test_signal_adjustment_stacking_and_caps():
 
 
 def test_ep_final_blend_of_ep_next_and_season_average():
-    """v1.0: blend = (w.ep·ep_next + w.form·ppg·chance) / (w.ep + w.form) — on
-    the points scale (the old model shrank every projection by ~16%)."""
+    """blend = (w.ep·ep_next + w.form·ppg·f) / (w.ep + w.form) — on the points
+    scale (the old model shrank every projection by ~16%). ep_next has FPL's own
+    flag scaling removed and the calibrated curve f applied once (v1.1)."""
     cfg = _cfg()
     assert ep_final(p(ep_next=10.0, points_per_game=10.0), [], cfg) == 10.0
     # ep_next 10, season average 6 → (7 + 0.9) / 0.85
     assert abs(ep_final(p(ep_next=10.0, points_per_game=6.0), [], cfg) - 7.9 / 0.85) < 1e-9
-    # the season-average term is scaled by chance of playing; ep_next already is
+    # 75% flag: FPL's ep_next 7.5 is form 10 × 0.75 → unflagged 10.0, curve 0.60
     got = ep_final(p(ep_next=7.5, points_per_game=10.0, chance_of_playing_next_round=75), [], cfg)
-    assert abs(got - (0.7 * 7.5 + 0.15 * 7.5) / 0.85) < 1e-9
+    assert abs(got - (0.7 * 10.0 * 0.6 + 0.15 * 10.0 * 0.6) / 0.85) < 1e-9
+    assert abs(got - 6.0) < 1e-9
 
 
-def test_ep_final_does_not_reapply_availability():
-    """FPL's ep_next is form × chance of playing, so a 75% doubt is NOT
-    discounted again (the old model did doubt × chance × official signal)."""
+def test_ep_final_applies_calibrated_curve_once():
+    """FPL's ep_next is form × chance/100, so it is un-scaled first and the
+    calibrated curve (75% → 0.60) is applied exactly once. Official FPL news
+    is still not priced a second time."""
     cfg = _cfg(active=True)
     doubt = p(ep_next=3.0, points_per_game=4.0, status="d", chance_of_playing_next_round=75)
     official = [{"sentiment": "negative", "confidence": 0.7, "source": "fpl-official"}]
-    expected = (0.7 * 3.0 + 0.15 * 3.0) / 0.85
+    # unflagged ep_next = 3.0 / 0.75 = 4.0
+    expected = (0.7 * 4.0 * 0.6 + 0.15 * 4.0 * 0.6) / 0.85
+    assert abs(expected - 2.4) < 1e-9
     assert abs(ep_final(doubt, official, cfg) - expected) < 1e-9
+
+
+def test_ep_final_unflagged_without_chance():
+    """No flag → ep_next is used as it is."""
+    cfg = _cfg()
+    pl = p(ep_next=6.0, points_per_game=6.0, chance_of_playing_next_round=None)
+    assert ep_final(pl, [], cfg) == 6.0
+    assert ep_next_unflagged(pl) == 6.0
+    assert ep_next_unflagged(p(ep_next=6.0, chance_of_playing_next_round=100)) == 6.0
+
+
+def test_ep_next_unflagged_undoes_fpl_scaling():
+    assert ep_next_unflagged(p(ep_next=3.0, chance_of_playing_next_round=75)) == 4.0
+    assert ep_next_unflagged(p(ep_next=2.0, chance_of_playing_next_round=50)) == 4.0
+    assert ep_next_unflagged(p(ep_next=0.0, chance_of_playing_next_round=0)) == 0.0
+
+
+@pytest.mark.parametrize("chance,expected", [
+    (None, 1.0), (100, 1.0), (99, 0.60), (75, 0.60), (74, 0.50), (50, 0.50),
+    (49, 0.05), (25, 0.05), (24, 0.0), (0, 0.0),
+])
+def test_play_factor_buckets(chance, expected):
+    assert play_factor(p(chance_of_playing_next_round=chance), _cfg()) == expected
+
+
+def test_play_factor_hard_gates():
+    cfg = _cfg()
+    assert play_factor(p(status="u"), cfg) == 0.0
+    assert play_factor(p(status="s"), cfg) == 0.0
+    assert play_factor(p(can_select=0), cfg) == 0.0
+
+
+def test_play_factor_from_config():
+    cfg = _cfg()
+    cfg.optimizer.availability_curve = types.SimpleNamespace(play_75=0.7, play_50=0.4, play_25=0.1)
+    assert play_factor(p(chance_of_playing_next_round=75), cfg) == 0.7
+    assert play_factor(p(chance_of_playing_next_round=50), cfg) == 0.4
+    assert play_factor(p(chance_of_playing_next_round=25), cfg) == 0.1
+
+
+def test_default_config_carries_the_curve():
+    from app.config import ConfigFile
+    c = ConfigFile()
+    assert (c.optimizer.availability_curve.play_75, c.optimizer.availability_curve.play_50,
+            c.optimizer.availability_curve.play_25) == (0.60, 0.50, 0.05)
+    # an existing config.json without the key loads with the defaults
+    assert ConfigFile.model_validate({"optimizer": {}}).optimizer.availability_curve.play_75 == 0.60
 
 
 def test_ep_final_fixture_multiplier_by_position():
@@ -167,7 +223,6 @@ def test_score_lineup_chips():
 
 
 def _cfg(active=False):
-    import types
     return types.SimpleNamespace(
         optimizer=types.SimpleNamespace(
             weights=types.SimpleNamespace(ep=0.7, form=0.15, fixture=0.15),

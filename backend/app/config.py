@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -141,9 +142,10 @@ class OptimizerWeights(BaseModel):
 
 
 class AvailabilityConfig(BaseModel):
-    # v1.0: FPL's ep_next already includes chance of playing, so this map no
-    # longer scales projected points. It feeds the `safe` profile's
-    # reliability weight only. active=False → reliability ignores doubts.
+    # v1.1: extra caution for the Safe plan, applied on top of the calibrated
+    # projection (which already carries `AvailabilityCurve`). It feeds the
+    # `safe` profile's reliability weight only. active=False → reliability
+    # ignores doubts.
     active: bool = False
     doubt: float = 0.7
     chance_null: float = 1.0
@@ -152,6 +154,20 @@ class AvailabilityConfig(BaseModel):
     chance_50: float = 0.65
     chance_25: float = 0.35   # FIX T2: bucket for 25 ≤ chance < 50
     chance_0: float = 0.0     # FIX T2: also used for 0 < chance < 25 (effectively out)
+
+
+class AvailabilityCurve(BaseModel):
+    # v1.1: share of a fit player's points that a player flagged at this
+    # chance of playing actually delivers (2025-26 backtest, ADD-FEATURES.MD §1).
+    play_75: float = Field(0.60, ge=0, le=1)   # 75 <= chance < 100
+    play_50: float = Field(0.50, ge=0, le=1)   # 50 <= chance < 75
+    play_25: float = Field(0.05, ge=0, le=1)   # 25 <= chance < 50   (below 25 → 0)
+
+
+class MinutesModelConfig(BaseModel):
+    # v1.1: blend weight of the minutes-based estimate (0 = off).
+    enabled: bool = True
+    weight: float = Field(0.5, ge=0, le=1)
 
 
 class SignalConfig(BaseModel):
@@ -173,6 +189,8 @@ class SolverConfig(BaseModel):
 class OptimizerConfig(BaseModel):
     weights: OptimizerWeights = Field(default_factory=OptimizerWeights)
     availability: AvailabilityConfig = Field(default_factory=AvailabilityConfig)
+    availability_curve: AvailabilityCurve = Field(default_factory=AvailabilityCurve)
+    minutes_model: MinutesModelConfig = Field(default_factory=MinutesModelConfig)
     signal: SignalConfig = Field(default_factory=SignalConfig)
     differential_lambda: float = 3.0
     differential_ep_floor: float = 0.4
@@ -206,7 +224,12 @@ def load_config() -> ConfigFile:
             raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
             return ConfigFile.model_validate(raw)
         except Exception:
-            pass  # corrupt config → defaults (file kept for inspection)
+            # Unreadable or out-of-range config → defaults. Keep the original
+            # next to it first, so a typo never silently destroys the settings.
+            try:
+                shutil.copy2(CONFIG_PATH, CONFIG_PATH.with_name(CONFIG_PATH.name + ".invalid"))
+            except OSError:
+                pass
     cfg = default_config()
     save_config(cfg)
     return cfg

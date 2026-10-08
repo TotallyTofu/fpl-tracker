@@ -197,6 +197,7 @@ CREATE TABLE IF NOT EXISTS lineup_players (
   is_captain INTEGER NOT NULL DEFAULT 0,
   is_vice_captain INTEGER NOT NULL DEFAULT 0,
   bought_cost INTEGER,                         -- snapshot of now_cost at add time
+  keep INTEGER NOT NULL DEFAULT 0,             -- 1 = plans never sell this player (ADD-FEATURE-KEEP.MD)
   PRIMARY KEY (lineup_id, player_id)
 );
 
@@ -289,6 +290,33 @@ CREATE TABLE IF NOT EXISTS chip_plays_log (
   chip TEXT NOT NULL,
   played_at TEXT NOT NULL,
   UNIQUE(gw, chip)
+);
+
+CREATE TABLE IF NOT EXISTS player_gw_history (
+  player_id INTEGER NOT NULL,
+  gw INTEGER NOT NULL,
+  team_matches INTEGER NOT NULL,   -- len(explain): 0 = blank GW, 2 = double GW
+  minutes INTEGER NOT NULL,
+  starts INTEGER,                  -- NULL if the API stops sending it (drift)
+  total_points INTEGER NOT NULL,
+  final INTEGER NOT NULL DEFAULT 0, -- 1 = fetched after the GW's data_checked
+  fetched_at TEXT NOT NULL,
+  PRIMARY KEY (player_id, gw)
+);
+CREATE INDEX IF NOT EXISTS idx_pgh_gw ON player_gw_history(gw);
+
+CREATE TABLE IF NOT EXISTS projection_log (
+  gw INTEGER NOT NULL,
+  player_id INTEGER NOT NULL,
+  status TEXT, chance INTEGER, ep_next REAL,
+  ep_v10 REAL,        -- v1.0 formula: curve 0.75/0.50/0.25, minutes model off
+  ep_final REAL,      -- what the app projected
+  minutes_ep REAL, p_start REAL,
+  logged_at TEXT NOT NULL,
+  ep_nonews REAL,     -- ep_final with every news signal removed
+  news_adj REAL,      -- total news adjustment S in blend x fixture x (1 + S)
+  news_detail TEXT,   -- JSON per source: n, adj, signals, ep_without (see optimizer/projlog.py)
+  PRIMARY KEY (gw, player_id)
 );
 
 CREATE TABLE IF NOT EXISTS poll_log (
@@ -443,6 +471,15 @@ def init_db(path: str | Path | None = None) -> None:
             conn.execute("ALTER TABLE lineups ADD COLUMN bank_money INTEGER")
         if lup and "bank_gw" not in lup:
             conn.execute("ALTER TABLE lineups ADD COLUMN bank_gw INTEGER")
+        # keep-players migration: lineup_players.keep (additive; existing rows = not kept)
+        lpl = _table_columns(conn, "lineup_players")
+        if lpl and "keep" not in lpl:
+            conn.execute("ALTER TABLE lineup_players ADD COLUMN keep INTEGER NOT NULL DEFAULT 0")
+        # v1.1 migration: news columns on projection_log (the table shipped without them)
+        pl = _table_columns(conn, "projection_log")
+        for col, typ in (("ep_nonews", "REAL"), ("news_adj", "REAL"), ("news_detail", "TEXT")):
+            if pl and col not in pl:
+                conn.execute(f"ALTER TABLE projection_log ADD COLUMN {col} {typ}")
         # FIX N10 migration: raw_items.extract_attempts (additive, retry counter)
         ri = _table_columns(conn, "raw_items")
         if ri and "extract_attempts" not in ri:
@@ -630,6 +667,25 @@ def upsert_events(events: list[dict]) -> int:
     return len(rows)
 
 
+def upsert_gw_history(gw: int, rows: list[tuple], final: bool) -> int:
+    """Store one gameweek's per-player lines (v1.1). ``rows`` are
+    ``(player_id, team_matches, minutes, starts, total_points)``; ``final`` marks
+    rows fetched after the gameweek's data_checked (they are never re-fetched).
+    One transaction, so a GW is stored whole or not at all."""
+    ts = now_utc()
+    flag = 1 if final else 0
+    sql = (
+        "INSERT INTO player_gw_history (player_id, gw, team_matches, minutes, starts, "
+        "total_points, final, fetched_at) VALUES (?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(player_id, gw) DO UPDATE SET team_matches=excluded.team_matches, "
+        "minutes=excluded.minutes, starts=excluded.starts, total_points=excluded.total_points, "
+        "final=excluded.final, fetched_at=excluded.fetched_at"
+    )
+    execute_many(sql, [(pid, gw, tm, mins, starts, pts, flag, ts)
+                       for (pid, tm, mins, starts, pts) in rows])
+    return len(rows)
+
+
 # FPL's bootstrap-static chips[] uses "3xc"; the app's UI/config/advice all use
 # "triple_captain". Normalise on ingest so `chips.name` is always the app's
 # spelling — `raw_json` keeps the upstream value for forensics.
@@ -717,6 +773,9 @@ def check_season_rollover(season_marker: str) -> bool:
             # season-scoped logs: a stale GW row would keep the Free-Hit ban alive
             # into the new season and UNIQUE(gw, chip) would block re-logging.
             "chip_plays_log",
+            # v1.1: FPL re-numbers player ids every season, so old history rows
+            # would be attached to the wrong players. No foreign keys.
+            "player_gw_history", "projection_log",
             # parents
             "players", "fixtures", "events", "chips",
             # lineups last (lineup_players/suggestions already gone)

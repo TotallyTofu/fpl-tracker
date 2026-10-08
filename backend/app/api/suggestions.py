@@ -25,27 +25,16 @@ from ..optimizer import transfers as tmath
 from ..optimizer.rules import TRANSFER_CAP
 from ..optimizer.scoring import score_lineup
 from ..optimizer.solver import PROFILES, SolveParams, _team_fixtures, dedupe_profiles, solve
+from ..signals.store import signals_by_player as _current_signals
 from .lineups import _decrement_chips, roll_bank
 
 log = logging.getLogger("fpl.api.suggestions")
 router = APIRouter()
 
 
-def _current_signals() -> dict[int, list[dict]]:
-    """Active (non-expired) signals grouped by player."""
-    rows = query(
-        "SELECT * FROM signals WHERE (expires_at IS NULL OR expires_at > ?) ORDER BY retrieved_at DESC",
-        (now_utc(),),
-    )
-    out: dict[int, list[dict]] = {}
-    for r in rows:
-        out.setdefault(r["player_id"], []).append(dict(r))
-    return out
-
-
 def _current_squad_for_diff(lid: int) -> list[dict]:
     return query(
-        """SELECT lp.player_id, p.web_name, p.now_cost, lp.bought_cost
+        """SELECT lp.player_id, p.web_name, p.now_cost, lp.bought_cost, lp.keep
            FROM lineup_players lp JOIN players p ON p.id = lp.player_id
            WHERE lp.lineup_id = ?""",
         (lid,),
@@ -94,6 +83,7 @@ def _rebuild_gain(params: SolveParams, base_adjusted: float, chips: dict,
             target_gw=params.target_gw, profile="max_ep", cfg=cfg,
             signals_by_player=params.signals_by_player, chip_played=playable[0],
             bank_money=params.bank_money, use_ep_next=params.use_ep_next,
+            locked_ids=params.locked_ids,       # a rebuild must not sell a kept player either
         ))
     except Exception:
         log.exception("rebuild-gain estimate failed (chip advice falls back)")
@@ -130,6 +120,7 @@ async def generate(body: dict) -> dict:
     bank = roll_bank(lineup)
     bank_money = lineup.get("bank_money")
     current_squad = _current_squad_for_diff(lid)
+    locked = frozenset(p["player_id"] for p in current_squad if p["keep"])
     signals = _current_signals()
     chip_covers = tmath.chip_covers_transfers(chips, target_gw, chip)
     use_ep_next = season["next_gw"] is None or target_gw == season["next_gw"]
@@ -149,6 +140,7 @@ async def generate(body: dict) -> dict:
             chip_played=chip,
             bank_money=bank_money,
             use_ep_next=use_ep_next,
+            locked_ids=locked,
         )
         params_by_profile[profile] = params
         try:
@@ -183,6 +175,7 @@ async def generate(body: dict) -> dict:
             ep_by_player={p["id"]: p["ep"] for p in s.universe},
             bank_money=bank_money, chip_played=chip,
         )
+        diff["kept_ids"] = sorted(locked)   # the plan view greys these (what it was made with)
         transfers_n = max(len(diff["transfers_in"]), len(diff["transfers_out"]))
         cap_ok = transfers_n <= TRANSFER_CAP or chip_covers
         diff["transfer_cap_exceeded"] = not cap_ok
@@ -285,19 +278,21 @@ async def delete_suggestion(sid: int) -> dict:
 def _replace_squad(lid: int, squad: list[dict]) -> None:
     """Make the saved team the applied suggestion: roles, bench order and
     captaincy from the suggestion; purchase prices kept for players already
-    owned, today's price for new signings."""
-    prev = {r["player_id"]: r["bought_cost"] for r in query(
-        "SELECT player_id, bought_cost FROM lineup_players WHERE lineup_id = ?", (lid,))}
+    owned, today's price for new signings. Keep flags survive for players still
+    in the squad (a kept player always is); new signings start unkept."""
+    old = query("SELECT player_id, bought_cost, keep FROM lineup_players WHERE lineup_id = ?", (lid,))
+    prev = {r["player_id"]: r["bought_cost"] for r in old}
+    kept = {r["player_id"]: r["keep"] for r in old}
     rows = [
         (lid, e["player_id"], e["role"], e.get("bench_order"),
          1 if e.get("is_captain") else 0, 1 if e.get("is_vice_captain") else 0,
-         prev.get(e["player_id"], e.get("now_cost")))
+         prev.get(e["player_id"], e.get("now_cost")), kept.get(e["player_id"], 0))
         for e in squad
     ]
     execute("DELETE FROM lineup_players WHERE lineup_id = ?", (lid,))
     execute_many(
         "INSERT INTO lineup_players (lineup_id, player_id, role, bench_order, is_captain, "
-        "is_vice_captain, bought_cost) VALUES (?,?,?,?,?,?,?)",
+        "is_vice_captain, bought_cost, keep) VALUES (?,?,?,?,?,?,?,?)",
         rows,
     )
 

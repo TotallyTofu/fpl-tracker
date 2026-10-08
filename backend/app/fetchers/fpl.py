@@ -5,6 +5,8 @@ Endpoints:
 - /api/fixtures/              → team-level fixtures (base rows; also the PRIMARY
                                 live-score source — ESPN is blocked (403) from the
                                 user's network, see PLAN-4 T3.2 note)
+- /api/event/{gw}/live/       → every player's minutes/starts/points for one finished
+                                gameweek (v1.1 history store; one call per GW)
 - /api/element-summary/{pid}/ → per-player fixture difficulty + live history (M3)
 - /api/entry/{id}/            → optional public entry (M4)
 
@@ -32,6 +34,7 @@ from ..db import (
     upsert_chips,
     upsert_events,
     upsert_fixtures,
+    upsert_gw_history,
     upsert_players,
     upsert_teams,
 )
@@ -200,10 +203,103 @@ async def fetch_fixtures(with_difficulty: bool = True) -> int:
     return n
 
 
+async def fetch_gw_history(gw: int, final: bool) -> int:
+    """GET /api/event/{gw}/live/ → player_gw_history rows for that GW.
+
+    ``explain`` lists the player's team's fixtures in the GW (present even for
+    players who did not play), so ``len(explain)`` is 0 for a blank gameweek and
+    2 for a double. Returns the number of rows stored."""
+    data = await http.get_json(f"{BASE}/event/{gw}/live/")
+    rows: list[tuple] = []
+    starts_missing = False
+    for el in data.get("elements", []):
+        pid = el.get("id")
+        if pid is None:
+            continue
+        st = el.get("stats") or {}
+        team_matches = len(el.get("explain") or [])
+        # defensive (D18): minutes without explain should not happen; count 1
+        if team_matches == 0 and (st.get("minutes") or 0) > 0:
+            team_matches = 1
+        if "starts" not in st:
+            starts_missing = True
+        rows.append((pid, team_matches, int(st.get("minutes") or 0),
+                     st.get("starts"), int(st.get("total_points") or 0)))
+    if starts_missing and "event/live.stats.starts" not in _drift:
+        _drift.append("event/live.stats.starts")
+        log.warning("SCHEMA DRIFT: missing event/live stats.starts (start probability needs it)")
+    if not rows:
+        return 0
+    n = upsert_gw_history(gw, rows, final)
+    _check_history_matches(gw, rows)
+    return n
+
+
+def _check_history_matches(gw: int, rows: list[tuple]) -> None:
+    """Sanity check (logged, non-fatal): a player's ``team_matches`` should equal
+    the fixtures-table count for his current team in that GW. Catches a change in
+    how ``explain`` reports double gameweeks. Players who changed club mid-season
+    legitimately disagree, so a handful of mismatches is normal."""
+    try:
+        per_team: dict[int, int] = {}
+        for f in query("SELECT home_team, away_team FROM fixtures WHERE event = ?", (gw,)):
+            per_team[f["home_team"]] = per_team.get(f["home_team"], 0) + 1
+            per_team[f["away_team"]] = per_team.get(f["away_team"], 0) + 1
+        if not per_team:
+            return
+        team_of = {r["id"]: r["team"] for r in query("SELECT id, team FROM players")}
+        bad = [pid for (pid, tm, *_rest) in rows
+               if pid in team_of and per_team.get(team_of[pid], 0) != tm]
+        if bad:
+            log.warning("gw history GW%d: %d of %d players' match count disagrees with the "
+                        "fixtures table (e.g. player ids %s) — check how event/live reports "
+                        "double gameweeks", gw, len(bad), len(rows), bad[:5])
+    except Exception:
+        log.exception("gw history sanity check failed (non-fatal)")
+
+
+async def sync_gw_history() -> int:
+    """Fetch every finished GW that has no rows yet, or whose rows are not
+    final (fetched before data_checked). Sequential, politeness first.
+
+    The first run of a season backfills every finished GW (≤ 38 calls, once);
+    after that it is 0 calls, or 1 while the latest GW waits for data_checked.
+    A failing GW is logged and skipped; the others are unaffected."""
+    started = now_utc()
+    total = 0
+    fetched = 0
+    errors: list[str] = []
+    for ev in query("SELECT id, data_checked FROM events WHERE finished = 1 ORDER BY id"):
+        gw, checked = ev["id"], bool(ev["data_checked"])
+        have = query_one(
+            "SELECT COUNT(*) AS n, MIN(final) AS f FROM player_gw_history WHERE gw = ?", (gw,))
+        if have and have["n"] and have["f"] == 1:
+            continue
+        try:
+            total += await fetch_gw_history(gw, checked)
+            fetched += 1
+        except Exception as e:
+            log.warning("gw history GW%d failed: %s", gw, e)
+            errors.append(f"GW{gw}: {e}")
+    if errors:
+        log_poll("fpl-history", "error", rows=total, error="; ".join(errors)[:500],
+                 started_at=started)
+    elif fetched:
+        log_poll("fpl-history", "ok", rows=total, started_at=started)
+        log.info("gw history: %d gameweek(s), %d rows", fetched, total)
+    return total
+
+
 async def refresh_all_fpl() -> None:
-    """Full FPL refresh: bootstrap + fixtures (+difficulty) + official-news signals."""
+    """Full FPL refresh: bootstrap + fixtures (+difficulty) + gameweek history + official-news
+    signals + the pre-deadline projection log."""
     await fetch_bootstrap()
     await fetch_fixtures()
+    # v1.1: per-gameweek minutes/starts/points (non-fatal, like the news step).
+    try:
+        await sync_gw_history()
+    except Exception:
+        log.exception("gw history sync failed (non-fatal)")
     # M2 T2.7b: official FPL status/news changes → conf 1.0 signals (non-fatal).
     try:
         from ..signals.pipeline import process_official_news
@@ -218,6 +314,16 @@ async def refresh_all_fpl() -> None:
             log.info("official news: %d signals", n)
     except Exception:
         log.exception("official news processing failed (non-fatal)")
+    # v1.1: record what the app projects before the deadline, for the scorecard
+    # (after the news step, so the same signals are priced in; non-fatal).
+    try:
+        from ..optimizer.projlog import log_projections
+
+        n = log_projections()
+        if n:
+            log.debug("projection log: %d rows", n)
+    except Exception:
+        log.exception("projection log failed (non-fatal)")
 
 
 # --- live (M3) -------------------------------------------------------------------

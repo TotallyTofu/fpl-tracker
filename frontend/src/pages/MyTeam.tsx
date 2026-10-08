@@ -3,13 +3,13 @@ import { useNavigate } from "react-router-dom";
 import { api, ApiError } from "../api";
 import LineupTabs from "../components/LineupTabs";
 import PasteBox from "../components/PasteBox";
-import PitchView from "../components/PitchView";
+import PitchView, { LockIcon } from "../components/PitchView";
 import PlayerPicker from "../components/PlayerPicker";
 import ValidationPanel from "../components/ValidationPanel";
 import { useSeason } from "../hooks/useSeason";
 import { validateClient } from "../rules";
 import type { Lineup, LineupPlayer, LineupSummary, MatchedPlayer, Player, SquadPlayer, TeamFixturesResponse } from "../types";
-import { CHIP_LABEL, POS_NAME, money } from "../types";
+import { CHIP_LABEL, POS_NAME, ROTATION_RISK, money, startTitle } from "../types";
 
 const CHIPS = ["wildcard", "freehit", "bboost", "triple_captain"] as const;
 type ChipUse = Record<string, number | null>; // null = available; 0 = used (GW unknown); n = used in GW n
@@ -101,6 +101,10 @@ function pickSwapVictim(candidates: LineupPlayer[], position: number): LineupPla
   return [...pool].sort((a, b) => ep(a) - ep(b) || a.player_id - b.player_id)[0];
 }
 
+/** Sorted ids of the kept players, to tell whether the Keep flags changed since the last save. */
+const keepKey = (players: LineupPlayer[]) =>
+  players.filter((p) => p.keep).map((p) => p.player_id).sort((a, b) => a - b).join(",");
+
 const sellValue = (now: number, paid: number | null) => {
   const b = paid ?? now;
   return now > b ? b + Math.floor((now - b) / 2) : now;
@@ -114,6 +118,7 @@ export default function MyTeam() {
   const [lineups, setLineups] = useState<LineupSummary[]>([]);
   const [draft, setDraft] = useState<Draft>(emptyDraft());
   const [savedChipUse, setSavedChipUse] = useState<ChipUse>({});
+  const [savedKeep, setSavedKeep] = useState("");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -146,6 +151,7 @@ export default function MyTeam() {
       const use = await chipUseFor(l);
       setDraft(toDraft(l, use));
       setSavedChipUse(use);
+      setSavedKeep(keepKey(l.players));
       setSelectedId(null);
       setSaveMsg(null);
     }).catch(() => {});
@@ -177,6 +183,7 @@ export default function MyTeam() {
     now_cost: p.now_cost, status: p.status, can_select: p.can_select, ep_next: p.ep_next,
     selected_by_percent: p.selected_by_percent, chance_of_playing_next_round: p.chance_of_playing_next_round,
     role, bench_order: order, is_captain: false, is_vice_captain: false, bought_cost: p.now_cost,
+    keep: false, // a new signing, or a replacement, is never kept
   });
 
   const addPlayer = (p: Player) =>
@@ -205,10 +212,19 @@ export default function MyTeam() {
   const loadMatched = (matched: MatchedPlayer[]) =>
     patch((d) => {
       const ids = new Set(matched.map((m) => m.player_id));
-      const keep = d.players.filter((p) => !ids.has(p.player_id));
-      const added = matched.map((m) => newPlayer(m, m.player_id, "starter", null));
-      return { ...d, players: assignRoles([...keep, ...added], d.players) };
+      const others = d.players.filter((p) => !ids.has(p.player_id));
+      // a player pasted again keeps his Keep flag
+      const added = matched.map((m) => ({
+        ...newPlayer(m, m.player_id, "starter", null),
+        keep: d.players.find((x) => x.player_id === m.player_id)?.keep ?? false,
+      }));
+      return { ...d, players: assignRoles([...others, ...added], d.players) };
     });
+
+  const toggleKeep = (id: number) => patch((d) => ({
+    ...d, players: d.players.map((p) => (p.player_id === id ? { ...p, keep: !p.keep } : p)),
+  }));
+  const clearKeep = () => patch((d) => ({ ...d, players: d.players.map((p) => ({ ...p, keep: false })) }));
 
   const setCaptain = () => patch((d) => ({
     ...d,
@@ -304,6 +320,9 @@ export default function MyTeam() {
     patch((d) => ({ ...d, chipUse: { ...d.chipUse, [chip]: v }, chips: { ...d.chips, [chip]: v === null ? 1 : 0 } }));
 
   const selected = draft.players.find((p) => p.player_id === selectedId) ?? null;
+  const keptIds = useMemo(
+    () => new Set(draft.players.filter((p) => p.keep).map((p) => p.player_id)), [draft.players]);
+  const keepUnsaved = draft.id !== null && keepKey(draft.players) !== savedKeep;
   const clientErrors = useMemo(() => validateClient(draft.players, draft.bank), [draft.players, draft.bank]);
   const totalCost = draft.players.reduce((s, p) => s + p.now_cost, 0);
   const sellTotal = draft.players.reduce((s, p) => s + sellValue(p.now_cost, p.bought_cost), 0);
@@ -352,12 +371,14 @@ export default function MyTeam() {
           player_id: p.player_id, role: p.role, bench_order: p.bench_order,
           is_captain: p.is_captain, is_vice_captain: p.is_vice_captain,
           bought_cost: p.bought_cost, // A15: real purchase prices
+          keep: p.keep ?? false,      // plans never sell a kept player
         })),
       };
       const saved = draft.id ? await api.updateLineup(draft.id, body) : await api.createLineup(body);
       const chipErr = await syncChipLog();
       setDraft(toDraft(saved, draft.chipUse));
       setSavedChipUse(draft.chipUse);
+      setSavedKeep(keepKey(saved.players));
       refreshLineups();
       setSaveMsg(chipErr ? { ok: false, text: `Team saved, but the chip log was not: ${chipErr}` } : { ok: true, text: "Team saved." });
     } catch (e) {
@@ -373,6 +394,7 @@ export default function MyTeam() {
   const newLineup = () => {
     setDraft(emptyDraft());
     setSavedChipUse({});
+    setSavedKeep("");
     setSelectedId(null);
   };
   const renameLineup = (id: number, name: string) => {
@@ -381,6 +403,7 @@ export default function MyTeam() {
       players: l.players.map((p) => ({
         player_id: p.player_id, role: p.role, bench_order: p.bench_order,
         is_captain: p.is_captain, is_vice_captain: p.is_vice_captain, bought_cost: p.bought_cost,
+        keep: p.keep,
       })),
     })).then(refreshLineups).catch(() => {});
   };
@@ -437,6 +460,11 @@ export default function MyTeam() {
                 <span className="spacer" />
                 <button type="button" className="sm" onClick={setCaptain} disabled={selected.role !== "starter"}>Captain</button>
                 <button type="button" className="sm ghost" onClick={setVice} disabled={selected.role !== "starter"}>Vice-captain</button>
+                <button type="button" className={`sm ${selected.keep ? "" : "ghost"}`}
+                  onClick={() => toggleKeep(selected.player_id)} aria-pressed={Boolean(selected.keep)}
+                  title="Plans never sell a kept player, even with a Wildcard or Free Hit">
+                  <LockIcon /> {selected.keep ? "Kept" : "Keep"}
+                </button>
                 {selected.role === "starter" ? (
                   <button type="button" className="sm ghost" onClick={() => moveToBench(selected.player_id)}
                     disabled={selected.is_captain || selected.is_vice_captain}
@@ -455,7 +483,7 @@ export default function MyTeam() {
                   ))}
                 <button type="button" className="sm danger" onClick={removePlayer}>Remove</button>
               </div>
-              <p className="help" style={{ marginTop: 6 }}>Pick a player in the list below to swap him in, or drag cards between the pitch and the bench.</p>
+              <p className="help" style={{ marginTop: 6 }}>Pick a player in the list below to swap him in, or drag cards between the pitch and the bench. Keep stops the plans selling him.</p>
             </div>
           ) : (
             <p className="help">Click a player to make him captain, move him or swap him. Drag cards to move them.</p>
@@ -470,8 +498,10 @@ export default function MyTeam() {
             onBenchReorder={reorderBench}
             fixtures={fixtures}
             gw={nextGw}
+            keptIds={keptIds}
           />
           <p className="help">Your goalkeeper sub has a fixed slot, as on the FPL site. Only the three outfield subs have an order.</p>
+          {keptIds.size > 0 && <p className="help">Grey shirt with a lock: kept. Plans never sell that player.</p>}
         </section>
 
         <div className="side">
@@ -525,6 +555,15 @@ export default function MyTeam() {
               </ul>
               <p className="help">One chip per gameweek. The GW you pick also stops the app suggesting a Free Hit straight after one.</p>
             </div>
+            {keptIds.size > 0 && (
+              <div className="field">
+                <span className="label">Keep players in lineup</span>
+                <div className="row" style={{ justifyContent: "space-between", flexWrap: "nowrap" }}>
+                  <span className="small"><b>{keptIds.size}</b> kept. Plans never sell them, even with a Wildcard or Free Hit.</span>
+                  <button type="button" className="sm ghost" onClick={clearKeep}>Clear</button>
+                </div>
+              </div>
+            )}
             <div className="row small muted" style={{ justifyContent: "space-between" }}>
               <span>Squad value {money(totalCost)}</span>
               <span>Sells for {money(sellTotal)}</span>
@@ -542,6 +581,7 @@ export default function MyTeam() {
                 Make transfer plans
               </button>
             )}
+            {keepUnsaved && <div className="alert warn">Keep changes aren't saved yet. Press Save team so plans use them.</div>}
             {saveMsg && <div className={`alert ${saveMsg.ok ? "ok" : "bad"}`}>{saveMsg.text}</div>}
             {draft.kind === "test" && <div className="alert info">Sandbox copy: changes here never touch your real team.</div>}
           </div>
@@ -551,13 +591,14 @@ export default function MyTeam() {
       <section className="card flush" aria-labelledby="sq-h">
         <div className="card-head">
           <h2 id="sq-h">Squad</h2>
-          <span className="small muted">Edit what you paid if it differs: you keep half of any price rise when you sell.</span>
+          <span className="small muted">Edit what you paid if it differs: you keep half of any price rise when you sell. Tick Keep and plans will never sell that player.</span>
         </div>
         <div className="table-wrap">
-          <table style={{ minWidth: 960 }}>
+          <table style={{ minWidth: 1000 }}>
             <thead>
               <tr>
-                <th className="sortable" style={{ paddingLeft: 20 }} onClick={() => clickSort("element_type")}>Pos</th>
+                <th style={{ paddingLeft: 20 }} title="Plans never sell a kept player, even with a Wildcard or Free Hit">Keep</th>
+                <th className="sortable" onClick={() => clickSort("element_type")}>Pos</th>
                 <th className="sortable" onClick={() => clickSort("web_name")}>Player</th>
                 <th>Next 3</th>
                 <th className="sortable num" onClick={() => clickSort("now_cost")}>Price</th>
@@ -565,6 +606,7 @@ export default function MyTeam() {
                 <th className="num">Sells for</th>
                 <th className="num">Form</th>
                 <th className="sortable num" onClick={() => clickSort("ep_next")}>FPL xP</th>
+                <th className="num" title="Chance of starting the next gameweek, from recent starts and the last match">Starts</th>
                 <th className="sortable num" onClick={() => clickSort("selected_by_percent")}>Owned</th>
                 <th style={{ paddingRight: 20 }}>Status</th>
               </tr>
@@ -575,11 +617,15 @@ export default function MyTeam() {
                 const doubt = p.status === "d" || p.status === "i" || (p.chance_of_playing_next_round != null && p.chance_of_playing_next_round < 100);
                 const out = p.status === "u" || p.status === "s" || p.can_select === 0;
                 return (
-                  <tr key={p.player_id} className={`clickable ${selectedId === p.player_id ? "selected" : ""}`}
+                  <tr key={p.player_id} className={`clickable ${selectedId === p.player_id ? "selected" : ""} ${p.keep ? "kept" : ""}`}
                     onClick={() => setSelectedId(p.player_id)}>
-                    <td style={{ paddingLeft: 20 }}><span className="badge">{POS_NAME[p.element_type]}</span></td>
+                    <td style={{ paddingLeft: 20 }} onClick={(e) => e.stopPropagation()}>
+                      <input type="checkbox" checked={Boolean(p.keep)} onChange={() => toggleKeep(p.player_id)}
+                        aria-label={`Keep ${p.web_name}`} />
+                    </td>
+                    <td><span className="badge">{POS_NAME[p.element_type]}</span></td>
                     <td>
-                      <b>{p.web_name}</b>{" "}
+                      <b>{p.web_name}</b>{p.keep ? <> <span className="muted" title="Kept: plans never sell this player"><LockIcon /></span></> : null}{" "}
                       <span className="small muted">
                         {p.team_short ?? fixtures?.teams[String(p.team)]?.short ?? ""} · {p.role === "starter" ? "XI" : p.element_type === 1 ? "GK sub" : `sub ${(p.bench_order ?? 2) - (draft.players.some((x) => x.role === "bench" && x.element_type === 1) ? 1 : 0)}`}
                         {p.is_captain ? " · C" : ""}{p.is_vice_captain ? " · VC" : ""}
@@ -603,6 +649,14 @@ export default function MyTeam() {
                     <td className="num">{money(sellValue(p.now_cost, p.bought_cost))}</td>
                     <td className="num">{p.form != null ? Number(p.form).toFixed(1) : "—"}</td>
                     <td className="num"><b>{p.ep_next != null ? p.ep_next.toFixed(1) : "—"}</b></td>
+                    <td className="num">
+                      {p.p_start == null ? "—" : (
+                        <span className={`badge ${p.p_start < 0.3 ? "out" : p.p_start < ROTATION_RISK ? "warn" : ""}`}
+                          title={startTitle(p)}>
+                          {Math.round(p.p_start * 100)}%
+                        </span>
+                      )}
+                    </td>
                     <td className="num">{p.selected_by_percent != null ? `${p.selected_by_percent.toFixed(1)}%` : "—"}</td>
                     <td style={{ paddingRight: 20 }}>
                       <span className={`badge ${out ? "out" : doubt ? "warn" : "ok"}`}>
@@ -613,7 +667,7 @@ export default function MyTeam() {
                 );
               })}
               {sorted.length === 0 && (
-                <tr><td colSpan={10} className="muted" style={{ padding: 20 }}>No players yet. Paste a list or search below.</td></tr>
+                <tr><td colSpan={12} className="muted" style={{ padding: 20 }}>No players yet. Paste a list or search below.</td></tr>
               )}
             </tbody>
           </table>

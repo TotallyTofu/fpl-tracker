@@ -80,6 +80,15 @@
       "chance_25": 0.35,
       "chance_0": 0.0
     },
+    "availability_curve": {
+      "play_75": 0.6,
+      "play_50": 0.5,
+      "play_25": 0.05
+    },
+    "minutes_model": {
+      "enabled": true,
+      "weight": 0.5
+    },
     "signal": {
       "neg_per": -0.5,
       "neg_cap": -0.6,

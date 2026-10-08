@@ -113,6 +113,32 @@ def db_path(tmp_path, monkeypatch):
     return p
 
 
+# v1.1: gameweek history for three players (opt-in, so the rest of the suite
+# keeps projecting without it). (player_id, gw, team_matches, minutes, starts, points)
+HISTORY = [
+    # 11 "Mid A One": nailed starter — 5 × 90 minutes
+    (11, 1, 1, 90, 1, 6), (11, 2, 1, 90, 1, 7), (11, 3, 1, 90, 1, 5),
+    (11, 4, 1, 90, 1, 8), (11, 5, 1, 90, 1, 6),
+    # 12 "Mid A Two": rotation — one start, then cameos and DNPs
+    (12, 1, 1, 90, 1, 2), (12, 2, 1, 20, 0, 1), (12, 3, 1, 0, 0, 0),
+    (12, 4, 1, 25, 0, 1), (12, 5, 1, 0, 0, 0),
+    # 19 "Fwd A One": a blank GW (GW2, excluded) and a double GW (GW4)
+    (19, 1, 1, 90, 1, 8), (19, 2, 0, 0, 0, 0), (19, 3, 1, 90, 1, 2),
+    (19, 4, 2, 180, 2, 12), (19, 5, 1, 90, 1, 5),
+]
+
+
+@pytest.fixture()
+def with_history(db_path):
+    """db_path plus player_gw_history rows for players 11, 12 and 19."""
+    by_gw: dict[int, list[tuple]] = {}
+    for pid, gw, tm, mins, starts, pts in HISTORY:
+        by_gw.setdefault(gw, []).append((pid, tm, mins, starts, pts))
+    for gw, rows in by_gw.items():
+        dbmod.upsert_gw_history(gw, rows, final=True)
+    return db_path
+
+
 @pytest.fixture()
 def cfg():
     """Lightweight cfg with the exact fields the optimizer reads (fast test solver)."""

@@ -1,7 +1,9 @@
 """FPL rule validator — single source of truth (PLAN.MD §5, §8.9).
 
 Used for BOTH user-entered lineups (strict=False: PLAYER_UNAVAILABLE is a warning)
-and solver output (strict=True: every error is fatal).
+and solver output (strict=True: every error is fatal). One exception: a player
+the user keeps ("Keep players in lineup") may be unavailable even in strict mode
+(``allow_unavailable``) — the plan holds him, projected 0.
 
 Money: the £100.0m limit only binds a squad built from scratch. A real squad
 can be worth more after price rises, and what it can afford depends on the
@@ -34,7 +36,8 @@ def _err(code: str, message: str, severity: str = "error") -> dict:
 
 
 def validate_lineup(players: list[dict], bank: int, chips: dict | None = None,
-                    strict: bool = False) -> SquadCheck:
+                    strict: bool = False,
+                    allow_unavailable: frozenset = frozenset()) -> SquadCheck:
     """Validate a 15-player lineup.
 
     players: list of dicts with at least:
@@ -124,7 +127,7 @@ def validate_lineup(players: list[dict], bank: int, chips: dict | None = None,
 
     for p in players:
         if p.get("status") in ("u", "s") or p.get("can_select") == 0:
-            sev = "error" if strict else "warning"
+            sev = "error" if strict and p["player_id"] not in allow_unavailable else "warning"
             name = p.get("web_name") or f"player {p['player_id']}"
             errors.append(_err("PLAYER_UNAVAILABLE",
                                f"{name} is unavailable (status={p.get('status')})",

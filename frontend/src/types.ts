@@ -61,6 +61,27 @@ export interface RuleError {
   severity: "error" | "warning";
 }
 
+export type LastMatch = "started" | "came_on" | "no_minutes";
+
+/** Below this chance of starting, a player gets a rotation-risk chip. */
+export const ROTATION_RISK = 0.6;
+
+const LAST_MATCH_TEXT: Record<LastMatch, string> = {
+  started: "started",
+  came_on: "came on",
+  no_minutes: "did not play",
+};
+
+/** "Starts ~45%: started 2 of last 5; last match: came on" (tooltip text). */
+export function startTitle(p: { p_start?: number | null; last_match?: LastMatch | null; start_rate5?: number | null }): string {
+  if (p.p_start == null) return "";
+  const parts = [`Starts ~${Math.round(p.p_start * 100)}%`];
+  const detail: string[] = [];
+  if (p.start_rate5 != null) detail.push(`started ${Math.round(p.start_rate5 * 5)} of last 5`);
+  if (p.last_match) detail.push(`last match: ${LAST_MATCH_TEXT[p.last_match]}`);
+  return detail.length ? `${parts[0]} — ${detail.join("; ")}` : parts[0];
+}
+
 export interface LineupPlayer {
   player_id: number;
   web_name: string;
@@ -85,6 +106,13 @@ export interface LineupPlayer {
   team_short?: string | null;
   /** solver projection (suggested squads only) */
   ep?: number;
+  /** v1.1 rotation risk (display only): P(starts next GW), what happened in the
+   *  last match, and the share of his recent team matches he started. */
+  p_start?: number | null;
+  last_match?: LastMatch | null;
+  start_rate5?: number | null;
+  /** "Keep players in lineup": plans never sell this player (stored lineups only) */
+  keep?: boolean;
 }
 
 // A23: a suggested squad (SuggestedLineup.squad) is a LineupPlayer minus
@@ -151,6 +179,8 @@ export interface Diff {
   bank_before?: number;
   budget_before?: number;
   budget_after?: number;
+  /** players the user kept when this plan was made (absent on older plans) */
+  kept_ids?: number[];
 }
 
 export interface ChipAdvice {
@@ -287,8 +317,23 @@ export interface AvailabilityConfig {
   doubt: number;
   chance_null: number;
   chance_100: number;
+  chance_75: number;
   chance_50: number;
+  chance_25: number;
   chance_0: number;
+}
+
+/** v1.1: share of a fit player's points that a flagged player delivers. */
+export interface AvailabilityCurve {
+  play_75: number;
+  play_50: number;
+  play_25: number;
+}
+
+/** v1.1: blend of a minutes-based estimate into the projection. */
+export interface MinutesModelConfig {
+  enabled: boolean;
+  weight: number;
 }
 
 export interface SignalConfig {
@@ -307,6 +352,8 @@ export interface SolverConfig {
 export interface OptimizerConfig {
   weights: OptimizerWeights;
   availability: AvailabilityConfig;
+  availability_curve: AvailabilityCurve;
+  minutes_model: MinutesModelConfig;
   signal: SignalConfig;
   differential_lambda: number;
   differential_ep_floor: number;

@@ -127,20 +127,92 @@ For each player in the target gameweek:
 
 ```
 projected = blend × fixture × (1 + news)
+blend     = 0.5 × v1 + 0.5 × minutes          (minutes model, if the player has history)
+v1        = (0.70 · FPL ep_next* + 0.15 · season points-per-game × flag) / 0.85
+minutes   = flag × points per 90 (shrunk to the position average) × expected share of 90 × fixtures
+flag      = 1 fit · 0.60 at 75% · 0.50 at 50% · 0.05 at 25% · 0 below
+fixture   = 1 + 0.15 · k · (3 − difficulty)      k = 0.8 for GK/DEF, 0.5 for MID/FWD
+news      = −0.5 × confidence per negative signal (floor −0.6), +0.1 per positive (cap +0.2)
 
-blend   = (0.70 · FPL ep_next + 0.15 · season points-per-game × chance of playing) / 0.85
-fixture = 1 + 0.15 · k · (3 − difficulty)      k = 0.8 for GK/DEF, 0.5 for MID/FWD
-news    = −0.5 × confidence per negative signal (floor −0.6), +0.1 per positive (cap +0.2)
+* ep_next with FPL's own flag scaling removed, so the flag counts once
 ```
 
-- FPL's `ep_next` is already "recent form × chance of playing", so injury
-  doubts are **not** discounted again, and official FPL news does not move the
-  number (it is already in `ep_next`).
+(0.70 / 0.15 are the default weights; Settings → Optimizer can change them.)
+
+- **Injury flags are calibrated, not taken at face value.** FPL's flags are
+  optimistic: in 2025-26, regular starters flagged 75% played 54% of the time,
+  flagged 50% played 20%, flagged 25% played 10%. FPL's `ep_next` is simply
+  "form × chance of playing", so the app undoes that scaling and applies the
+  `flag` curve above instead. The three numbers are in Settings → Optimizer →
+  Injury-flag calibration. Official FPL news still does not move the number a
+  second time.
+- **Minutes model.** The app stores every player's minutes, starts and points
+  for each finished gameweek (one `event/{gw}/live` call per gameweek, then
+  never again). The minutes model estimates how much of each match a player
+  plays from his last five matches (60%) and the season (40%), and his points
+  per 90 from his season so far, pulled toward the position average (as if he
+  had 450 extra minutes at that average, so early in the season everyone is
+  pulled hard toward the middle). Rotation risk and reduced roles lower the
+  projection. Players with no history keep the v1 projection. The blend weight
+  (default 0.5) is in Settings → Optimizer → Minutes model.
 - A club with no fixture in the gameweek scores 0; a double gameweek counts both
   fixtures.
-- Gameweeks after the next one use the season average only (FPL only publishes
-  expected points for the next gameweek).
-- The weights are in Settings → Optimizer.
+- Gameweeks after the next one have no FPL `ep_next`, so they use the season
+  average blended with the minutes model. **That combination was not
+  backtested.**
+
+**What this does and does not show.** The 2025-26 backtest (gameweeks 12-38,
+about 9,900 player-gameweeks) found the minutes model lowers the average
+projection error by about 6% (0.114 points, 95% interval 0.092-0.138) and
+improves the ranking of players, including early in 2026-27 with only 2-4
+gameweeks of history. The calibrated flags barely change the overall error
+(only 1-3% of players are flagged) but remove the bias for flagged players
+(75% flagged: error 1.89 → 1.72). **None of this measurably improved the points
+of the top picks** (top 30: +0.12 points, interval −0.06 to +0.32). These are
+more accurate projections that flag rotation and injury risk, not a proven
+way to pick better teams. The backtest used a simplified blend without the
+fixture multiplier or news; `scripts/scorecard.py` measures the real thing.
+
+### Starts ~X%
+
+My team and the plan pitch show how likely a player is to **start** the next
+gameweek, from how many of his last five matches he started and what happened in
+his last match (started, came on, did not play), and cut down for an injury flag.
+Nailed starters show about 85-90%. A small `~45%` chip appears on the pitch
+below 60% when there is no injury flag, My team has a Starts column (amber below
+60%, red below 30%), and transfer-in rows say "starts ~X%" below 80%. It is a
+display and risk signal only: the solver does not use it, and it is not the same
+number as the minutes model. The Safe plan does not discount it either (that is a
+risk preference; decide after seeing the chips for a few gameweeks).
+
+### Checking the model against this season
+
+Before each deadline the app logs what it projected for every player
+(`projection_log`, next to what the v1.0 formula would have said). Once a
+gameweek's data is final:
+
+```powershell
+cd backend
+..\.venv\Scripts\python scripts\scorecard.py
+```
+
+prints, per gameweek and pooled, the error, bias and rank correlation of the
+v1.0 and current projections, the same for injury-flagged players only, and a
+table checking the start probability against what happened.
+
+It also answers **"does news help?"**. The app logs, for every player, the
+projection with every news signal removed, the total news adjustment, and the
+projection with each source (BBC, ESPN, Reddit, YouTube) left out. The scorecard
+compares "without" against "with" for players that had news (all news, net
+negative, net positive, injury-flagged) and for each source on its own. If
+Reddit's "with" error is not lower than its "without" error over a few hundred
+player-gameweeks, Reddit is not earning its place. Official FPL news is not part
+of this: it is already inside `ep_next`.
+
+The scorecard never changes anything: if the flag curve, the minutes weight or a
+news source looks off, change it in Settings. A few gameweeks is a small sample;
+wait for hundreds of rows before moving anything (per-source news rows are the
+smallest samples).
 
 ### The three plans
 
@@ -148,12 +220,29 @@ news    = −0.5 × confidence per negative signal (floor −0.6), +0.1 per posi
 |---|---|
 | Best projected | projected points |
 | Differential | projected points + a bonus for players few managers own (λ = 3) |
-| Safe | projected points × reliability (doubts and negative news cost extra) |
+| Safe | projected points × reliability (doubts and negative news cost extra, **on top of** the calibrated flag curve) |
 
 The solver starts from your squad, tries every legal single swap and takes the
 best one repeatedly (steepest ascent), then refines with a seeded random search.
 It is deterministic: the same data gives the same plans. If two plans end up
 identical, the second is labelled "same team as…".
+
+### Keeping players
+
+On **My team**, select a player and press **Keep** (or tick the Keep column in the
+Squad table) and the plans will never sell him. Kept players show as grey shirts
+with a lock. There is no limit on how many you keep.
+
+- It holds in every plan and under every chip, **including a Wildcard or Free Hit**,
+  and in the "what would a rebuild gain" estimate behind the chip advice.
+- It only stops the plans selling him. He is not forced into the starting XI or the
+  captaincy; the plans still choose those. Keep all 15 and the plans make no
+  transfers, only pick the XI, bench and captain.
+- A kept player who is injured or suspended stays in the squad, projected at 0 and
+  on the bench. He does not count as a forced replacement, so he costs no −4.
+- Keep is saved with **Save team** and belongs to that team: a sandbox copy has its
+  own flags, and marking a plan as done keeps them. Editing the squad by hand is
+  never blocked, and a player you swap in is not kept.
 
 ### FPL rules enforced (2026/27)
 
@@ -236,8 +325,9 @@ things need a human check before GW1:
 
 ```powershell
 cd backend
-..\.venv\Scripts\python -m pytest tests -q                  # 316 tests, no network
+..\.venv\Scripts\python -m pytest tests -q                  # 413 tests, no network
 ..\.venv\Scripts\python scripts\check_name_resolution.py    # every player resolves from his own name
+..\.venv\Scripts\python scripts\scorecard.py                  # projection log vs actual points (needs a finished gameweek)
 cd ..\frontend
 npx tsc --noEmit
 npx vite build
@@ -252,7 +342,8 @@ backend/app/
   fetchers/          fpl, bbc, espn, reddit, youtube
   signals/           ingest (dedupe), names (player matching), llm_extractor,
                      rule_extractor (keyword fallback), store (expiry), pipeline
-  optimizer/         rules (validator), scoring (projection), solver, transfers (diff + chips)
+  optimizer/         rules (validator), scoring (projection), minutes (minutes model, start
+                     probability), projlog (pre-deadline projection log), solver, transfers (diff + chips)
   api/               meta, entry, players, lineups, suggestions, news
 frontend/src/
   pages/             Dashboard (This gameweek), MyTeam, Suggestions (Transfer plans), News, Settings

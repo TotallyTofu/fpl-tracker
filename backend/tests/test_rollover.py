@@ -9,7 +9,7 @@ SEASON_TABLES = (
     "players", "fixtures", "events", "chips",
     "lineups", "lineup_players", "suggestions",
     "live_matches", "live_player_points", "official_news_cache",
-    "signals", "raw_items", "chip_plays_log",
+    "signals", "raw_items", "chip_plays_log", "player_gw_history", "projection_log",
 )
 
 

@@ -40,7 +40,12 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
       const body = await r.json();
       if (typeof body.detail === "string") msg = body.detail;
       else if (Array.isArray(body.detail)) {
-        errors = body.detail;
+        // our rule errors are {code, message}; FastAPI/pydantic ones are {loc, msg}
+        errors = body.detail.map((e: { code?: string; message?: string; msg?: string; loc?: unknown[]; severity?: string }) => ({
+          code: e.code ?? "invalid",
+          message: e.message ?? (e.msg ? `${(e.loc ?? []).slice(1).join(".")}: ${e.msg}` : e.code ?? "invalid"),
+          severity: e.severity ?? "error",
+        }));
         msg = errors.map((e) => e.message || e.code).join("; ");
       } else if (body.error) msg = body.error;
     } catch {

@@ -1,27 +1,39 @@
-"""Projected-points model (v1.0).
+"""Projected-points model (v1.1).
 
     ep_final = blend × fixture_mult × (1 + S)
 
-    blend        = (w.ep · ep_next  +  w.form · ppg · chance · n_fixtures) / (w.ep + w.form)
+    v1          = (w.ep · ep_next* + w.form · ppg · f · n_fixtures) / (w.ep + w.form)
+    blend       = (1 − m) · v1 + m · minutes_ep          (m = minutes_model.weight; v1 if no history)
+    minutes_ep  = f · points-per-90 (shrunk to the position mean) · expected share of 90 · n_fixtures
+    f           = play_factor: 1 fit · availability_curve (0.60 / 0.50 / 0.05) for a 75 / 50 / 25 flag · 0 below
     fixture_mult = 1 + w.fixture · k_pos · (3 − difficulty)   (averaged over the GW's fixtures)
     S            = news-signal adjustment (official FPL news excluded, see below)
 
-Why this shape (verified against the live API on 2026-10-05):
+    * ep_next with FPL's own flag scaling removed (``ep_next_unflagged``), so the
+      flag counts exactly once.
+
+Why this shape (verified against the live API on 2026-10-05, backtest 2026-10-08):
 
 - FPL's ``ep_next`` is the 30-day form average × chance of playing: 615 of
   667 players have ``ep_next == form``, and Rice (form 4.0, 75%) has 3.0.
-  Availability is therefore already priced in. The old model multiplied it
-  in again (doubt × chance bucket) and then once more through the official
-  news signal, so a 75% player was projected at ~30% of his form.
+  The old model multiplied availability in again (doubt × chance bucket) and
+  then once more through the official news signal. v1.0 priced it once, with
+  FPL's linear scaling; v1.1 undoes that scaling and applies a *calibrated*
+  curve instead, because FPL's flags are optimistic: regular starters flagged
+  75% played 54% of the time, 50% → 20%, 25% → 10% (ADD-FEATURES.MD §1).
 - Blending ``ep_next`` with ``form`` blended a number with itself. The
   season points-per-game average is the independent, steadier estimate.
 - Fixture difficulty used to move a player by at most ±0.15 points; it is
   now a multiplier (±24% for GK/DEF, ±15% for MID/FWD at difficulty 1 vs 5
   with the default weight), and the weights no longer shrink every
   projection by ~16%.
+- The minutes model (``optimizer/minutes.py``) estimates how much of each
+  match a player plays from his recent per-gameweek minutes, so rotation risk
+  and reduced roles lower the projection. It is blended 50/50 with v1.
 
 ``availability_multiplier`` still exists: it drives the ``safe`` profile's
-reliability weight and the hard gates (u/s/can_select=0 → 0).
+reliability weight (extra caution on top of the calibrated projection) and
+the hard gates (u/s/can_select=0 → 0).
 """
 from __future__ import annotations
 
@@ -43,7 +55,10 @@ def _hard_gated(p: dict) -> bool:
 
 def availability_multiplier(p: dict, cfg) -> float:
     """A(p) for the safe profile's reliability: 0 for hard gates, else the
-    doubt/chance map when ``optimizer.availability.active``."""
+    doubt/chance map when ``optimizer.availability.active``.
+
+    v1.1: this is *extra caution for the Safe plan*, applied on top of a
+    projection that already carries the calibrated ``play_factor`` curve."""
     if _hard_gated(p):
         return 0.0
     av = cfg.optimizer.availability
@@ -66,6 +81,32 @@ def availability_multiplier(p: dict, cfg) -> float:
     else:                      # 0 < chance < 25 — effectively out
         a *= av.chance_0
     return a
+
+
+def play_factor(p: dict, cfg) -> float:
+    """Calibrated availability: 0 for hard gates, 1 for fit / no flag,
+    else the curve bucket. Same thresholds as availability_multiplier."""
+    if _hard_gated(p):
+        return 0.0
+    c = p.get("chance_of_playing_next_round")
+    if c is None or c >= 100:
+        return 1.0
+    cur = getattr(cfg.optimizer, "availability_curve", None)   # hand-built test cfgs
+    if c >= 75:
+        return getattr(cur, "play_75", 0.60)
+    if c >= 50:
+        return getattr(cur, "play_50", 0.50)
+    if c >= 25:
+        return getattr(cur, "play_25", 0.05)
+    return 0.0
+
+
+def ep_next_unflagged(p: dict) -> float:
+    """FPL's ep_next is form × chance/100 (verified: ratio 0.75/0.50/0.26 for
+    75/50/25 flags). Undo it so the calibrated curve is applied once."""
+    ep = ep_baseline(p)
+    c = p.get("chance_of_playing_next_round")
+    return ep * 100.0 / c if c is not None and 0 < c < 100 else ep
 
 
 def pricing_signals(signals: list[dict]) -> list[dict]:
@@ -105,9 +146,13 @@ def fixture_multiplier(p: dict, fixture_difficulty, cfg) -> float:
     return sum(1 + w * k * (3 - d) for d in diffs) / len(diffs)
 
 
-def _chance(p: dict) -> float:
-    c = p.get("chance_of_playing_next_round")
-    return 1.0 if c is None else max(0.0, min(100.0, float(c))) / 100.0
+def minutes_ep(p: dict, cfg, n_fix: int = 1) -> float | None:
+    """The minutes model's own estimate for one player, before the fixture and
+    news multipliers: flag × points per 90 × expected share of 90 × fixtures.
+    None without history (``mm_share`` is attached by ``solver.build_universe``)."""
+    if p.get("mm_share") is None:
+        return None
+    return play_factor(p, cfg) * p["mm_rate90"] * p["mm_share"] * n_fix
 
 
 def ep_final(p: dict, signals: list[dict], cfg, fixture_difficulty=None,
@@ -116,7 +161,8 @@ def ep_final(p: dict, signals: list[dict], cfg, fixture_difficulty=None,
 
     ``use_ep_next=False`` is for gameweeks after the next one: FPL only
     publishes expected points for the next GW, so later GWs use the season
-    average alone.
+    average alone (plus the minutes model, which does not use ``ep_next``;
+    that combination was not backtested).
     """
     if _hard_gated(p):
         return 0.0
@@ -125,13 +171,20 @@ def ep_final(p: dict, signals: list[dict], cfg, fixture_difficulty=None,
         return 0.0                              # blank gameweek
     n_fix = len(diffs) if diffs else 1
     w = cfg.optimizer.weights
-    ppg_term = float(p.get("points_per_game") or p.get("form") or 0.0) * _chance(p) * n_fix
+    f = play_factor(p, cfg)
+    ppg_term = float(p.get("points_per_game") or p.get("form") or 0.0) * f * n_fix
     if use_ep_next:
         w_ep, w_form = w.ep, w.form
         total = w_ep + w_form
-        blend = ((w_ep * ep_baseline(p) + w_form * ppg_term) / total) if total > 0 else ep_baseline(p)
+        ep_term = ep_next_unflagged(p) * f
+        blend = ((w_ep * ep_term + w_form * ppg_term) / total) if total > 0 else ep_term
     else:
         blend = ppg_term
+    mm = getattr(cfg.optimizer, "minutes_model", None)          # hand-built test cfgs: off
+    if mm and mm.enabled:
+        m_ep = minutes_ep(p, cfg, n_fix)
+        if m_ep is not None:
+            blend = (1 - mm.weight) * blend + mm.weight * m_ep
     return blend * fixture_multiplier(p, diffs, cfg) * (1 + signal_adjustment(p, signals, cfg))
 
 

@@ -97,6 +97,7 @@ export default function Suggestions() {
   };
 
   const isTest = lineup?.kind === "test";
+  const kept = lineup?.players.filter((p) => p.keep) ?? [];
   const sel = cards.find((c) => c.profile === selected) ?? cards[0];
   const best = [...cards].filter((s) => !s.variant_of).sort((a, b) => planNet(b) - planNet(a))[0];
   const stale = cards.length > 0 && cards[0].target_gw !== targetGw;
@@ -161,6 +162,12 @@ export default function Suggestions() {
               ? `${CHIP_LABEL[chip]}: unlimited free transfers this gameweek${chip === "freehit" ? "; your squad returns next week" : ""}. Press ${cards.length ? "Recalculate" : "Make plans"}.`
               : `${CHIP_LABEL[chip]} is counted in the projections. Press ${cards.length ? "Recalculate" : "Make plans"}.`}
         </p>
+        {kept.length > 0 && (
+          <p className="help" style={{ marginTop: 6 }}>
+            Kept, never sold{chip === "wildcard" || chip === "freehit" ? `, even with ${CHIP_LABEL[chip]}` : ""}:{" "}
+            <b>{kept.map((p) => p.web_name).join(", ")}</b>. <Link to="/team">Change in My team</Link>
+          </p>
+        )}
       </fieldset>
 
       {error && <div className="alert bad">{error}</div>}

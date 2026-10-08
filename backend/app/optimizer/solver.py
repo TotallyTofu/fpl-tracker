@@ -18,17 +18,27 @@ v1.0 changes (see README "How suggestions work"):
   triple captain makes the captain count three times.
 - The captain is set to the best pick for the profile after the climb, and
   the bench is GK first, then outfield subs by projected points.
+
+Keep players in lineup (ADD-FEATURE-KEEP.MD): ``SolveParams.locked_ids`` are
+players the user marked Keep. They are never sold — a hard constraint on every
+profile and chip, wildcard / free hit included (``_TransferCtx.can_sell``). A
+kept player who is unavailable is added to the universe anyway (projected 0,
+benched, not a forced transfer). ``solve`` raises if a plan ever loses one.
 """
 from __future__ import annotations
 
+import logging
 import random
 import time
 from dataclasses import dataclass, field
 
 from ..db import query
+from .minutes import attach_profiles
 from .rules import SQUAD_COMP, BUDGET, CLUB_LIMIT, validate_lineup
 from .scoring import availability_multiplier, ep_final, pricing_signals, score_lineup
 from .transfers import chip_covers_transfers, sell_value
+
+log = logging.getLogger("fpl.solver")
 
 PROFILES = ("max_ep", "differential", "safe")
 
@@ -57,6 +67,8 @@ class SolveParams:
     bank_money: int | None = None
     # False for GWs after the next one (FPL only publishes next-GW ep_next).
     use_ep_next: bool = True
+    # Keep: players the user marked "keep in lineup" — never sold (all chips).
+    locked_ids: frozenset = frozenset()
 
 
 @dataclass
@@ -77,19 +89,40 @@ class SolvedLineup:
     tctx: _TransferCtx | None = None  # transfer ctx used to solve (cap guard for dedupe)
 
 
-def build_universe(target_gw: int, cfg) -> list[dict]:
+def _unavailable(p: dict) -> bool:
+    """True for the players ``build_universe`` leaves out (its WHERE clause,
+    restated for rows that are in the universe only because they are kept)."""
+    c = p.get("chance_of_playing_next_round")
+    return (p.get("can_select") != 1 or bool(p.get("removed"))
+            or p.get("status") in ("u", "s") or (c is not None and c == 0))
+
+
+def build_universe(target_gw: int, cfg, include_ids: frozenset = frozenset()) -> list[dict]:
     """Eligible players: can_select=1, not u/s, not removed (hard gates);
-    chance_of_playing_next_round = 0 is excluded too (FPL prices them at 0)."""
+    chance_of_playing_next_round = 0 is excluded too (FPL prices them at 0).
+
+    ``include_ids`` (the players the user keeps) are added even when they fail
+    those gates: they stay in the squad, projected 0 by ``play_factor``."""
     # N3 (rev 2): t.name (full club name) — the LineupPlayer.team_name contract.
+    ids = sorted(include_ids)
+    extra = f" OR p.id IN ({','.join('?' * len(ids))})" if ids else ""
     sql = (
-        """SELECT p.*, t.name AS team_name
+        f"""SELECT p.*, t.name AS team_name
            FROM players p
            LEFT JOIN teams t ON t.id = p.team
-           WHERE p.can_select = 1 AND p.removed = 0
+           WHERE (p.can_select = 1 AND p.removed = 0
              AND (p.status IS NULL OR p.status NOT IN ('u', 's'))
-             AND (p.chance_of_playing_next_round IS NULL OR p.chance_of_playing_next_round <> 0)"""
+             AND (p.chance_of_playing_next_round IS NULL OR p.chance_of_playing_next_round <> 0)){extra}"""
     )
-    return [dict(p) for p in query(sql)]
+    players = [dict(p) for p in query(sql, ids)]
+    # v1.1: minutes-model fields (mm_share, mm_rate90, start_rate5, last_match,
+    # p_start) — None for players with no gameweek history.
+    attach_profiles(players, target_gw)
+    return players
+
+
+def _round_or_none(v: float | None) -> float | None:
+    return None if v is None else round(v, 2)
 
 
 def _difficulty_map(target_gw: int) -> dict[int, list[int]]:
@@ -198,6 +231,10 @@ class _TransferCtx:
     cost_basis: dict = field(default_factory=dict)
     cap_mult: int = 2           # 3 under Triple Captain
     bench_counts: bool = False  # True under Bench Boost
+    locked_ids: frozenset = frozenset()   # Keep: players that can never be sold
+
+    def can_sell(self, p: dict) -> bool:
+        return p.get("id", p.get("player_id")) not in self.locked_ids
 
     @property
     def hard_cap(self) -> int | None:
@@ -246,12 +283,25 @@ class _TransferCtx:
 
 
 def _greedy_seed(universe: list[dict], cfg, rng: random.Random,
-                 budget: int = BUDGET) -> list[dict]:
-    """Greedy 2/5/5/3 squad by ep/price with club cap + budget; noisy for restart diversity."""
+                 budget: int = BUDGET, locked: frozenset = frozenset(),
+                 cost=None) -> list[dict]:
+    """Greedy 2/5/5/3 squad by ep/price with club cap + budget; noisy for restart diversity.
+
+    ``locked`` (Keep) players are placed first; ``cost`` prices them (their sell
+    value). Everyone else is priced at ``now_cost``, as before."""
     squad: list[dict] = []
     picked: set[int] = set()
     club_count: dict[int, int] = {}
     left = budget
+    by_id = {p["id"]: p for p in universe} if locked else {}
+    for pid in sorted(locked):                      # sorted: deterministic
+        p = by_id.get(pid)
+        if p is None:
+            continue
+        squad.append(p)
+        picked.add(pid)
+        club_count[p["team"]] = club_count.get(p["team"], 0) + 1
+        left -= cost(p) if cost else p["now_cost"]
     for pos in (1, 2, 3, 4):
         cands = sorted(
             (p for p in universe if p["element_type"] == pos),
@@ -465,6 +515,10 @@ class _State:
                     "ep": round(p.get("ep", 0.0), 2),
                     "selected_by_percent": p.get("selected_by_percent"),
                     "chance_of_playing_next_round": p.get("chance_of_playing_next_round"),
+                    # v1.1 display fields (rotation risk); None without history
+                    "p_start": _round_or_none(p.get("p_start")),
+                    "last_match": p.get("last_match"),
+                    "start_rate5": _round_or_none(p.get("start_rate5")),
                     "role": role,
                     "bench_order": order,
                     "is_captain": p is self.captain,
@@ -513,9 +567,14 @@ def _hill_climb(state: _State, universe: list[dict], value_fn, cfg,
         ok = True
 
         if kind == "squad_swap":
-            i = rng.randrange(len(state.squad))
-            out_p = state.squad[i]
-            cands = by_pos.get(out_p["element_type"], [])
+            if tctx.locked_ids:
+                # Keep: draw from the sellable players, so kept ones don't eat the move budget
+                sellable = [j for j, p in enumerate(state.squad) if tctx.can_sell(p)]
+                i = rng.choice(sellable) if sellable else None
+            else:
+                i = rng.randrange(len(state.squad))   # unchanged: seeded results must not move
+            out_p = state.squad[i] if i is not None else None
+            cands = by_pos.get(out_p["element_type"], []) if out_p is not None else []
             if not cands:
                 ok = False
             else:
@@ -622,6 +681,8 @@ def _greedy_improve(state: _State, universe: list[dict], value_fn, tctx: _Transf
         best = None
         ids = {p["id"] for p in state.squad}
         for i, out_p in enumerate(state.squad):
+            if not tctx.can_sell(out_p):
+                continue
             for in_p in by_pos.get(out_p["element_type"], []):
                 if in_p["id"] in ids:
                     continue
@@ -683,7 +744,7 @@ def _run_restarts(params: SolveParams, universe: list[dict], value_fn,
         elif tctx.hard_cap is None:
             # sell values never exceed prices, so a squad that fits the budget at
             # current prices also fits it under the cost basis.
-            squad = _greedy_seed(universe, cfg, rrng, tctx.budget)
+            squad = _greedy_seed(universe, cfg, rrng, tctx.budget, tctx.locked_ids, tctx.cost)
         else:
             continue  # a fresh squad can never satisfy the cap
         if len(squad) != 15:
@@ -739,10 +800,14 @@ def solve(params: SolveParams) -> SolvedLineup:
     signals = params.signals_by_player
     chip = params.chip_played
 
-    universe_raw = [_precompute(p, cfg, signals, diff_map, params.use_ep_next)
-                    for p in build_universe(params.target_gw, cfg)]
-    uni_ids = {p["id"] for p in universe_raw}
     cur_ids = frozenset(p["player_id"] for p in params.current_squad)
+    locked = frozenset(params.locked_ids) & cur_ids
+    if params.locked_ids and locked != frozenset(params.locked_ids):
+        log.warning("ignoring kept ids outside the current squad: %s",
+                    sorted(frozenset(params.locked_ids) - cur_ids))
+    universe_raw = [_precompute(p, cfg, signals, diff_map, params.use_ep_next)
+                    for p in build_universe(params.target_gw, cfg, include_ids=locked)]
+    uni_ids = {p["id"] for p in universe_raw}
     if params.profile == "differential":
         universe = _apply_ep_floor(universe_raw, cfg, keep_ids=cur_ids)
     else:
@@ -755,7 +820,7 @@ def solve(params: SolveParams) -> SolvedLineup:
     covers = chip_covers_transfers(params.chips, params.target_gw, chip)
     common = dict(bank=params.bank, profile=params.profile, budget=budget, cost_basis=basis,
                   cap_mult=3 if chip == "triple_captain" else 2,
-                  bench_counts=chip == "bboost")
+                  bench_counts=chip == "bboost", locked_ids=locked)
     tctx = _TransferCtx(
         cur_ids=cur_ids,
         chip_covers=covers,
@@ -790,7 +855,11 @@ def solve(params: SolveParams) -> SolvedLineup:
         raise ValueError("solver produced a lineup that exceeds the free-transfer bank")
 
     lineup = best_state.as_lineup()
-    check = validate_lineup(lineup, params.bank, params.chips, strict=True)
+    dropped = locked - {l["player_id"] for l in lineup}
+    if dropped:
+        raise ValueError(f"solver sold kept player(s) {sorted(dropped)}")
+    check = validate_lineup(lineup, params.bank, params.chips, strict=True,
+                            allow_unavailable=locked)
     if not check.valid:
         raise ValueError(f"solver produced invalid lineup: {check.errors}")
 
@@ -812,6 +881,16 @@ def solve(params: SolveParams) -> SolvedLineup:
     if fallback:
         notes.append("No plan fits your free transfers (an unavailable player has no "
                      "affordable replacement), so extra transfers were allowed at −4 points each.")
+    if locked:
+        if len(locked) == 15:
+            notes.append("You kept all 15 players, so this plan only picks the starting XI, "
+                         "bench and captain.")
+        else:
+            notes.append("Kept by you, never sold: " + ", ".join(
+                p.get("web_name", "?") for p in squad_full if p["id"] in locked) + ".")
+        for p in squad_full:
+            if p["id"] in locked and _unavailable(p):
+                notes.append(f"{p.get('web_name', '?')} is kept although unavailable (projected 0).")
     top3 = sorted(xi_players, key=lambda p: p["ep"], reverse=True)[:3]
     notes.append("Top projected starters: " + ", ".join(
         f"{p.get('web_name', '?')} ({p['ep']:.1f})" for p in top3))
@@ -912,6 +991,8 @@ def _try_low_own_swap(s: SolvedLineup, tctx: _TransferCtx | None = None) -> bool
         budget = BUDGET
     by_pos: dict[int, list[dict]] = {}
     for e in s.squad:
+        if tctx is not None and not tctx.can_sell(e):
+            continue                          # Keep: a kept player is never the one swapped out
         by_pos.setdefault(e["element_type"], []).append(e)
     cands = sorted(
         (p for p in s.universe
@@ -959,6 +1040,9 @@ def _try_low_own_swap(s: SolvedLineup, tctx: _TransferCtx | None = None) -> bool
                     "ep": round(c.get("ep", 0.0), 2),
                     "selected_by_percent": c.get("selected_by_percent"),
                     "chance_of_playing_next_round": c.get("chance_of_playing_next_round"),
+                    "p_start": _round_or_none(c.get("p_start")),
+                    "last_match": c.get("last_match"),
+                    "start_rate5": _round_or_none(c.get("start_rate5")),
                 })
         if old_id in s.xi:
             s.xi = [c["id"] if i == old_id else i for i in s.xi]

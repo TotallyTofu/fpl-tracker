@@ -8,6 +8,9 @@ v1.0:
   so a team saved with 0 left has 1 again next week.
 - Bench: the substitute goalkeeper always takes bench slot 1 (FPL keeps him
   in his own slot); outfield subs keep their relative order in slots 2–4.
+- ``keep`` ("Keep players in lineup"): a per-player flag the plans honour — a
+  kept player is never sold, whatever the chip. A save that omits the field
+  (``None``) leaves the stored flag alone, like ``bought_cost``.
 """
 from __future__ import annotations
 
@@ -18,6 +21,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ..db import execute, now_utc, query, query_one
+from ..optimizer.minutes import attach_start_info
 from ..optimizer.rules import BUDGET, validate_lineup
 from ..signals.names import match_names
 
@@ -71,6 +75,7 @@ class LineupPlayerIn(BaseModel):
     is_captain: bool = False
     is_vice_captain: bool = False
     bought_cost: int | None = Field(None, ge=0)  # A15: real purchase price (None = keep/derive)
+    keep: bool | None = None                     # None = leave the stored flag as it is
 
 
 class LineupIn(BaseModel):
@@ -128,6 +133,9 @@ def _load_lineup(lid: int) -> dict | None:
     for p in pps:   # stored as 0/1 — the API contract (LineupPlayer) is boolean
         p["is_captain"] = bool(p["is_captain"])
         p["is_vice_captain"] = bool(p["is_vice_captain"])
+        p["keep"] = bool(p["keep"])
+    # v1.1: rotation risk for the next gameweek (display only)
+    attach_start_info(pps, _next_gw(), id_key="player_id")
     row["players"] = pps
     squad = [
         {
@@ -299,7 +307,7 @@ async def duplicate_lineup(lid: int, body: dict | None = None) -> dict:
                 LineupPlayerIn(
                     player_id=p["player_id"], role=p["role"], bench_order=p["bench_order"],
                     is_captain=p["is_captain"], is_vice_captain=p["is_vice_captain"],
-                    bought_cost=p["bought_cost"],
+                    bought_cost=p["bought_cost"], keep=p["keep"],
                 )
                 for p in src["players"]
             ],
@@ -353,23 +361,26 @@ def _validate_in(body: LineupIn) -> None:
 def _save_players(lid: int, body: LineupIn) -> None:
     """Persist squad rows. bought_cost (A15): an explicit value wins, else the
     previously stored value survives the DELETE-and-reinsert, else the current
-    price is the snapshot for a brand-new row."""
+    price is the snapshot for a brand-new row. ``keep`` works the same way: an
+    explicit flag wins, else the stored flag survives, else 0."""
     costs = {r["id"]: r["now_cost"] for r in query("SELECT id, now_cost FROM players")}
-    prev = {r["player_id"]: r["bought_cost"] for r in query(
-        "SELECT player_id, bought_cost FROM lineup_players WHERE lineup_id = ?", (lid,))}
+    old = query("SELECT player_id, bought_cost, keep FROM lineup_players WHERE lineup_id = ?", (lid,))
+    prev = {r["player_id"]: r["bought_cost"] for r in old}
+    prev_keep = {r["player_id"]: bool(r["keep"]) for r in old}
     execute("DELETE FROM lineup_players WHERE lineup_id = ?", (lid,))  # after the read above
     rows = []
     for p in body.players:
         paid = p.bought_cost if p.bought_cost is not None else prev.get(p.player_id)
         if paid is None:
             paid = costs.get(p.player_id)
+        keep = p.keep if p.keep is not None else prev_keep.get(p.player_id, False)
         rows.append(
             (lid, p.player_id, p.role, p.bench_order, 1 if p.is_captain else 0,
-             1 if p.is_vice_captain else 0, paid)
+             1 if p.is_vice_captain else 0, paid, 1 if keep else 0)
         )
     from ..db import execute_many
     execute_many(
-        "INSERT INTO lineup_players (lineup_id, player_id, role, bench_order, is_captain, is_vice_captain, bought_cost) "
-        "VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO lineup_players (lineup_id, player_id, role, bench_order, is_captain, "
+        "is_vice_captain, bought_cost, keep) VALUES (?,?,?,?,?,?,?,?)",
         rows,
     )

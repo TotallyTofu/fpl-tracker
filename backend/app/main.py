@@ -37,7 +37,7 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger("fpl.main")
 
 DIST = cfgmod.ROOT / "frontend" / "dist"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 _LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 _UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}

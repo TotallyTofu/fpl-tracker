@@ -1,6 +1,7 @@
 # secrets & local data
 .env
 config.json
+config.json.invalid
 data/
 !data/.gitkeep
 
@@ -19,5 +20,7 @@ tmp-video-test/
 probe_sources.py
 .npm-cache/
 .playwright-mcp/
+# exported AI chats kept as reference notes, not part of the app
+chat to ingest/
 # pytest temp dirs (when the system temp dir is not writable)
 pytest-of-*/

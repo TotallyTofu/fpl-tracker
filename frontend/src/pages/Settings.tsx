@@ -3,12 +3,14 @@ import { api } from "../api";
 import WeightSlider from "../components/WeightSlider";
 import type {
   AvailabilityConfig,
+  AvailabilityCurve,
   BbcSource,
   DbStats,
   EspnSource,
   FplSource,
   GroupConfig,
   LLMConfig,
+  MinutesModelConfig,
   OptimizerWeights,
   RedditSource,
   SettingsResponse,
@@ -18,6 +20,9 @@ import type {
 } from "../types";
 
 type Draft = Omit<SettingsResponse, "llm_status" | "reddit_status" | "pulp_available">;
+
+/** Keep a 0-1 setting inside its range while typing; the server enforces it too. */
+const unit = (raw: string) => Math.min(1, Math.max(0, Number(raw) || 0));
 
 function fmtBytes(n: number) {
   if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
@@ -76,6 +81,10 @@ export default function Settings() {
     set((d) => ({ ...d, optimizer: { ...d.optimizer, weights: w } }));
   const upAvail = (p: Partial<AvailabilityConfig>) =>
     set((d) => ({ ...d, optimizer: { ...d.optimizer, availability: { ...d.optimizer.availability, ...p } } }));
+  const upCurve = (p: Partial<AvailabilityCurve>) =>
+    set((d) => ({ ...d, optimizer: { ...d.optimizer, availability_curve: { ...d.optimizer.availability_curve, ...p } } }));
+  const upMinutes = (p: Partial<MinutesModelConfig>) =>
+    set((d) => ({ ...d, optimizer: { ...d.optimizer, minutes_model: { ...d.optimizer.minutes_model, ...p } } }));
   const upSignal = (p: Partial<SignalConfig>) =>
     set((d) => ({ ...d, optimizer: { ...d.optimizer, signal: { ...d.optimizer.signal, ...p } } }));
   const upSolver = (p: Partial<SolverConfig>) =>
@@ -565,7 +574,61 @@ export default function Settings() {
         <h3>Score weights (must sum to 1.00)</h3>
         <WeightSlider value={o.weights} onChange={upWeights} />
 
-        <h3>Availability map</h3>
+        <h3>Injury-flag calibration</h3>
+        <div className="row" style={{ gap: 16 }}>
+          {([["play_75", "flag 75%"], ["play_50", "flag 50%"], ["play_25", "flag 25%"]] as const).map(([k, label]) => (
+            <label key={k}>
+              {label}{" "}
+              <input
+                type="number"
+                min={0}
+                max={1}
+                step={0.05}
+                style={{ width: 70 }}
+                value={o.availability_curve[k]}
+                onChange={(e) => upCurve({ [k]: unit(e.target.value) })}
+              />
+            </label>
+          ))}
+        </div>
+        <div className="small muted" style={{ marginTop: 6 }}>
+          Share of a fit player's points that a flagged player is projected to score (0–1; below a 25% flag
+          counts as 0). Flagged players score less than FPL's percentage suggests. 2025-26: players
+          flagged 75% played 54% of the time.
+        </div>
+
+        <h3>Minutes model</h3>
+        <div className="row" style={{ gap: 16 }}>
+          <label>
+            <input
+              type="checkbox"
+              checked={o.minutes_model.enabled}
+              onChange={(e) => upMinutes({ enabled: e.target.checked })}
+            />{" "}
+            enabled
+          </label>
+          <label>
+            weight{" "}
+            <input
+              type="number"
+              min={0}
+              max={1}
+              step={0.05}
+              style={{ width: 70 }}
+              value={o.minutes_model.weight}
+              onChange={(e) => upMinutes({ weight: unit(e.target.value) })}
+            />
+          </label>
+        </div>
+        <div className="small muted" style={{ marginTop: 6 }}>
+          Blends a minutes-based estimate with FPL's projection (0 = FPL only, 1 = minutes only). Backtest:
+          ~6% lower error. Also used for gameweeks after the next one, which was not backtested.
+        </div>
+
+        <h3>Safe plan — extra caution for doubts</h3>
+        <div className="small muted" style={{ marginBottom: 8 }}>
+          Applied on top of the calibrated projection, and only to the Safe plan.
+        </div>
         <div className="row" style={{ gap: 16 }}>
           <label>
             <input
@@ -585,36 +648,19 @@ export default function Settings() {
               onChange={(e) => upAvail({ doubt: Number(e.target.value) })}
             />
           </label>
-          <label>
-            chance 100%{" "}
-            <input
-              type="number"
-              step={0.05}
-              style={{ width: 70 }}
-              value={o.availability.chance_100}
-              onChange={(e) => upAvail({ chance_100: Number(e.target.value) })}
-            />
-          </label>
-          <label>
-            chance 50%{" "}
-            <input
-              type="number"
-              step={0.05}
-              style={{ width: 70 }}
-              value={o.availability.chance_50}
-              onChange={(e) => upAvail({ chance_50: Number(e.target.value) })}
-            />
-          </label>
-          <label>
-            chance 0%{" "}
-            <input
-              type="number"
-              step={0.05}
-              style={{ width: 70 }}
-              value={o.availability.chance_0}
-              onChange={(e) => upAvail({ chance_0: Number(e.target.value) })}
-            />
-          </label>
+          {([["chance_100", "chance 100%"], ["chance_75", "chance 75%"], ["chance_50", "chance 50%"],
+             ["chance_25", "chance 25%"], ["chance_0", "chance 0%"]] as const).map(([k, label]) => (
+            <label key={k}>
+              {label}{" "}
+              <input
+                type="number"
+                step={0.05}
+                style={{ width: 70 }}
+                value={o.availability[k]}
+                onChange={(e) => upAvail({ [k]: Number(e.target.value) })}
+              />
+            </label>
+          ))}
         </div>
 
         <h3>Signal coefficients</h3>
@@ -797,7 +843,7 @@ export default function Settings() {
       <div className="panel">
         <h2 style={{ marginTop: 0 }}>About</h2>
         <div className="small">
-          <b>FPL Tracker v1.0.0</b> — local-first FPL team optimizer. No FPL login by design: data comes from public
+          <b>FPL Tracker v1.1.0</b> — local-first FPL team optimizer. No FPL login by design: data comes from public
           endpoints only, and your API key (if any) is stored in this machine's config.json / .env and sent only to
           your LLM endpoint.
         </div>
